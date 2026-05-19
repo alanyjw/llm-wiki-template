@@ -1,0 +1,20 @@
+**/.DS_Store
+
+assets/**
+node_modules/**
+
+# Obsidian UI state — churns every session, not meaningful to track
+.obsidian/workspace.json
+.obsidian/graph.json
+
+# Claude Code local-only config — per-machine permission allowlist, not shared
+.claude/settings.local.json
+
+# Scheduled-task lock — per-machine runtime artefact, not shared
+.claude/scheduled_tasks.lock
+
+# Python bytecode cache from .claude/scripts/ — regenerated, not shared
+**/__pycache__/
+
+# Git worktrees — isolated per-task workspaces, never tracked
+.claude/worktrees/

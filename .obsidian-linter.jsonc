@@ -1,0 +1,83 @@
+// markdownlint-obsidian config — Layer 1 of the wiki-lint pipeline.
+// Layer 2 (.claude/scripts/wiki-lint.py) handles vault-specific checks
+// the vendor tool can't do correctly today (table-pipe-in-wikilink
+// detection, per-type frontmatter schema).
+//
+// Pinned to markdownlint-obsidian-cli@1.1.0 via the GitHub Actions
+// workflow. v1.1.0 lands the three upstream PRs we filed in late April:
+//   - issue #26 — MD028 default-disable regression test (already disabled)
+//   - issue #27 — `wikilinks.resolveMode: "obsidian-fuzzy"` (now used here)
+//   - issue #28 — OFM901 `Fix.deleteCount` sentinel handled gracefully
+//
+// Tuning rationale:
+// - OFM001 (broken-wikilinks) stays DISABLED for now even though the
+//   issue #27 fuzzy resolver ships in 1.1.0. Reason: a CI run on 1.1.0
+//   with OFM001 enabled surfaced ~50 pre-existing broken wikilinks —
+//   `[[../glossary]]` parent-traversal patterns (not valid Obsidian
+//   syntax), `[[raw/notes-import/...]]` references that fall outside the
+//   `wiki` vault root, and a handful of wikilinks with trailing
+//   backslashes. These are real content debt, not linter bugs.
+//   Re-enable OFM001 after a dedicated content-cleanup pass; until then
+//   Layer 2 (wiki-lint.py) validates wikilinks with its own resolver.
+// - Disable MD012 (multiple-blank-lines): rolling logs (backlog.md
+//   especially) accumulate stretches of blank lines as section
+//   separators; same cosmetic class as the other MD disables below.
+// - Disable MD022/MD032/MD028/MD036 etc.: high false-positive volume on
+//   the Recent-Updates callout convention and the vault's writing style.
+// - Keep most OFM frontmatter / embed / callout rules — these gave real
+//   signal (OFM087 caught 9 type bugs).
+// - Disable OFM064 (duplicate-tags): the rule treats any `#Word` as a tag,
+//   but the glossary uses `#TermName` patterns for inline emphasis and
+//   anchor cross-references to its own H2 sections (per CLAUDE.md
+//   convention `[[glossary#TERM]]`). 33/34 OFM064 hits are this pattern;
+//   the 34th is a hex color `#0D9488` in a CSS-style snippet. All false
+//   positives in this vault.
+{
+  "vaultRoot": "wiki",
+  "globs": ["**/*.md"],
+  "wikilinks": {
+    "caseSensitive": false,
+    "allowAlias": true,
+    "resolveMode": "obsidian-fuzzy"
+  },
+  "ignores": [
+    "node_modules/**",
+    ".obsidian/**",
+    ".git/**",
+    "raw/**",
+    "assets/**",
+    "templates/**",
+    "prompts/**"
+  ],
+  "rules": {
+    // === OFM Wikilinks ===
+    "OFM001": { "enabled": false }, // broken-wikilinks → re-enable after content-cleanup pass on the ~50 pre-existing broken links surfaced by 1.1.0's fuzzy resolver. See top-of-file rationale.
+    // OFM002-007 stay default-enabled.
+
+    // === OFM Tags ===
+    "OFM064": { "enabled": false }, // duplicate-tags → false positives on glossary `#Term` anchor refs and CSS hex colors
+
+    // === OFM Embeds, Callouts, Block-refs, Highlights, Frontmatter ===
+    // All default-enabled; these gave real signal in the experiment.
+
+    // === Standard markdownlint — disable cosmetic / stylistic noise ===
+    "MD004": { "enabled": false }, // unordered-list-style
+    "MD009": { "enabled": false }, // trailing-spaces
+    "MD012": { "enabled": false }, // multiple-blank-lines (backlog/log accumulate them as separators — cosmetic)
+    "MD013": { "enabled": false }, // line-length (long lines are fine for synthesis prose)
+    "MD022": { "enabled": false }, // blanks-around-headings (760 hits — cosmetic)
+    "MD024": { "enabled": false }, // no-duplicate-heading (intentional in some pages)
+    "MD025": { "enabled": false }, // single-h1 (some pages have multiple; convention)
+    "MD026": { "enabled": false }, // no-trailing-punctuation in headings
+    "MD028": { "enabled": false }, // blanks-inside-blockquote (Recent-Updates callout false-positive — also default-disabled in 1.1.0 per issue #26)
+    "MD029": { "enabled": false }, // ol-prefix
+    "MD031": { "enabled": false }, // blanks-around-fences
+    "MD032": { "enabled": false }, // blanks-around-lists (970 hits — cosmetic)
+    "MD036": { "enabled": false }, // no-emphasis-as-heading (bold callout titles)
+    "MD037": { "enabled": false }, // no-space-in-emphasis
+    "MD040": { "enabled": false }, // fenced-code-language
+    "MD041": { "enabled": false }, // first-line-h1 (frontmatter is line 1)
+    "MD049": { "enabled": false }  // emphasis-style
+    // Other MD rules stay default-enabled — flag-when-they-fire approach.
+  }
+}

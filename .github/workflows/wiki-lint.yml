@@ -1,0 +1,64 @@
+name: wiki-lint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'wiki/**'
+      - '.obsidian-linter.jsonc'
+      - '.claude/scripts/wiki-lint.py'
+      - '.claude/scripts/regenerate-index.py'
+      - '.github/workflows/wiki-lint.yml'
+  pull_request:
+    paths:
+      - 'wiki/**'
+      - '.obsidian-linter.jsonc'
+      - '.claude/scripts/wiki-lint.py'
+      - '.claude/scripts/regenerate-index.py'
+      - '.github/workflows/wiki-lint.yml'
+  workflow_dispatch: {}
+
+jobs:
+  lint:
+    name: Lint wiki/
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Layer 1: vendor CLI (markdownlint-obsidian) — pinned.
+      # Catches OFM frontmatter / tag / callout / embed rules + standard
+      # markdownlint. Baseline cleared 2026-05-02; now GATES the build.
+      # Note: backlog/glossary/log are carved out via .obsidian-linter.jsonc
+      # ignores due to vendor OFM901 auto-fix bug — see comment there.
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.10'
+
+      - name: Layer 1 — markdownlint-obsidian (gates the build)
+        id: layer1
+        run: |
+          bunx --bun markdownlint-obsidian-cli@1.1.0 "wiki/**/*.md" --vault-root wiki
+
+      # Layer 2: vault-specific Python script — GATES the build.
+      # Catches today's bug class (table-pipe-in-wikilink), Obsidian-fuzzy
+      # broken-wikilink resolution, and per-type frontmatter schema. Baseline
+      # cleared at template creation; any new error in these categories fails CI.
+      # Stdlib only — no setup-python deps needed.
+      - name: Layer 2 — wiki-lint.py (gates the build)
+        id: layer2
+        run: |
+          python3 .claude/scripts/wiki-lint.py wiki/ --gh-annotations --vault-root .
+
+      # Index drift check — fails if wiki/index.md is out of sync with the
+      # filesystem (missing pages, stale per-section counts, orphan entries).
+      # Fix locally with: python3 .claude/scripts/regenerate-index.py
+      - name: Index drift — regenerate-index.py --check (gates the build)
+        id: index_check
+        run: |
+          python3 .claude/scripts/regenerate-index.py --check
+
+      - name: Done
+        if: success()
+        run: echo "::notice title=wiki-lint::All checks passed."
