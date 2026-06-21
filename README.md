@@ -44,9 +44,12 @@ cross-referenced. `CLAUDE.md` is the schema that tells the LLM exactly how.
 ## Toolchain
 
 - **`qmd`** — indexes the markdown corpus for keyword + semantic search.
-- **`.claude/scripts/wiki-lint.py`** — vault-specific markdown lint.
+- **`.claude/scripts/wiki-lint.py`** — vault-specific markdown lint (wikilinks, frontmatter schema, provenance, recent-updates discipline).
+- **`.claude/scripts/check-date-updated.py`** — CI-only FM007 gate: a synthesis page whose body changed must bump `date_updated`.
 - **`.claude/scripts/regenerate-index.py`** — reconciles `wiki/index.md`.
-- **`.github/workflows/wiki-lint.yml`** — CI that runs the lint on every push.
+- **`.claude/scripts/bump-markdownlint-obsidian.sh`** — pins/bumps the vendor lint CLI.
+- **`.github/workflows/wiki-lint.yml`** — CI that runs all lint gates on every push.
+- **`.nvmrc`** — pins the Node version used for `qmd` / `bunx` (`nvm use`).
 
 ## Included skills
 
