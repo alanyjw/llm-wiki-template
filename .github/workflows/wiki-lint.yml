@@ -7,6 +7,7 @@ on:
       - 'wiki/**'
       - '.obsidian-linter.jsonc'
       - '.claude/scripts/wiki-lint.py'
+      - '.claude/scripts/check-date-updated.py'
       - '.claude/scripts/regenerate-index.py'
       - '.github/workflows/wiki-lint.yml'
   pull_request:
@@ -14,6 +15,7 @@ on:
       - 'wiki/**'
       - '.obsidian-linter.jsonc'
       - '.claude/scripts/wiki-lint.py'
+      - '.claude/scripts/check-date-updated.py'
       - '.claude/scripts/regenerate-index.py'
       - '.github/workflows/wiki-lint.yml'
   workflow_dispatch: {}
@@ -25,10 +27,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # full history needed for the FM007 date_updated diff
 
       # Layer 1: vendor CLI (markdownlint-obsidian) — pinned.
       # Catches OFM frontmatter / tag / callout / embed rules + standard
-      # markdownlint. Baseline cleared 2026-05-02; now GATES the build.
+      # markdownlint. Gates the build.
       # Note: backlog/glossary/log are carved out via .obsidian-linter.jsonc
       # ignores due to vendor OFM901 auto-fix bug — see comment there.
       - name: Setup Bun
@@ -42,14 +46,54 @@ jobs:
           bunx --bun markdownlint-obsidian-cli@1.1.0 "wiki/**/*.md" --vault-root wiki
 
       # Layer 2: vault-specific Python script — GATES the build.
-      # Catches today's bug class (table-pipe-in-wikilink), Obsidian-fuzzy
-      # broken-wikilink resolution, and per-type frontmatter schema. Baseline
-      # cleared at template creation; any new error in these categories fails CI.
+      # Hard gates (errors fail CI):
+      #   - WIKI001 — table-pipe-in-wikilink (Obsidian table-cell breakage)
+      #   - WIKI002 — broken wikilink (Obsidian-fuzzy resolution)
+      #   - WIKI003 — broken wikilink #anchor
+      #   - FM001..FM004 — per-type required frontmatter
+      #   - FM005 — raw_sources path must exist in the repo
+      #   - RU001..RU003 — Recent-updates callout discipline on
+      #                    insights/topics/plans/projects
+      # Soft gates (warnings — don't fail CI):
+      #   - FM006 — recommended frontmatter keys (date_ingested, source_count, …)
+      #   - RU004 — Recent-updates callout holds >3 entries (older roll off)
+      #   - PROV001 — direct [[raw/...]] link in a synthesis page (one-hop
+      #               provenance rule; projects/ exempt for Related-sources)
+      #   - WIKI007 — anchor-prose source-count mismatch on topic pages
       # Stdlib only — no setup-python deps needed.
       - name: Layer 2 — wiki-lint.py (gates the build)
         id: layer2
         run: |
           python3 .claude/scripts/wiki-lint.py wiki/ --gh-annotations --vault-root .
+
+      # FM007 — date_updated freshness (CI-only, git-aware). Fails if a synthesis
+      # page's body changed in this commit/PR but date_updated was not bumped.
+      # Scope: wiki/insights/, wiki/topics/, wiki/plans/, wiki/projects/.
+      # Skipped on workflow_dispatch (no base SHA) and initial branch pushes.
+      - name: Layer 2b — date_updated freshness (FM007, CI-only)
+        id: date_updated_check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request)
+              BASE="$PR_BASE_SHA"
+              ;;
+            push)
+              BASE="$PUSH_BEFORE_SHA"
+              if [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+                echo "Initial push — no prior commit to compare; skipping FM007."
+                exit 0
+              fi
+              ;;
+            *)
+              echo "Event '$EVENT_NAME' has no base SHA — skipping FM007."
+              exit 0
+              ;;
+          esac
+          python3 .claude/scripts/check-date-updated.py --base "$BASE" --gh-annotations
 
       # Index drift check — fails if wiki/index.md is out of sync with the
       # filesystem (missing pages, stale per-section counts, orphan entries).

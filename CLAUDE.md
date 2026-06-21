@@ -424,20 +424,38 @@ The wiki has a two-layer markdown lint that gates CI on every PR/push touching `
 bunx --bun markdownlint-obsidian-cli@1.1.0 "wiki/**/*.md" --vault-root wiki
 ```
 
-**Layer 2 — `.claude/scripts/wiki-lint.py` (vault-specific).** Three checks the vendor tool can't do correctly today:
-1. `table-pipe-in-wikilink` — `[[X|Y]]` inside a markdown table cell breaks the table; the inner `|` must be `\|` escaped.
-2. `broken-wikilink` (Obsidian-fuzzy resolution) — handles this vault's mixed `[[sources/foo]]` (wiki-implicit) and `[[raw/notes-import/foo]]` (vault-absolute) link conventions via name-fuzzy resolution.
-3. `frontmatter-schema` (per-type required fields) — `source` requires `raw_sources`, `plan` and `project` require `status`, `insight` requires `confidence`. Stdlib-only.
+**Layer 2 — `.claude/scripts/wiki-lint.py` (vault-specific, stdlib-only).** Checks the vendor tool can't do correctly today.
+
+*Hard gates (errors — fail CI):*
+- `WIKI001` table-pipe-in-wikilink — `[[X|Y]]` inside a table cell breaks the table; the inner `|` must be `\|` escaped.
+- `WIKI002` broken-wikilink — Obsidian-fuzzy resolution that handles this vault's mixed `[[sources/foo]]` (wiki-implicit) and `[[raw/notes-import/foo]]` (vault-absolute) link conventions.
+- `WIKI003` broken-wikilink-anchor — the `#anchor` of a wikilink must resolve to a real heading or glossary term in the target.
+- `FM001`–`FM004` per-type required frontmatter — `source` requires `raw_sources`; `plan`/`project` require `status`; `insight` requires `confidence`; etc. (see Page Types).
+- `FM005` raw_sources paths must resolve — every path in a source page's `raw_sources:` must point to a file that exists on disk (catches typos and post-rename drift).
+- `RU001`–`RU003` Recent-updates callout discipline — in-scope synthesis pages (insights/topics/plans/projects) must carry the callout immediately after frontmatter, with at least one dated entry whose date is ≥ `date_updated`.
+
+*Soft gates (warnings — don't fail CI):*
+- `FM006` recommended frontmatter keys (`date_ingested`, `source_count`, …).
+- `RU004` Recent-updates callout holds more than 3 entries (older ones should roll off — history lives in `wiki/log.md` + git).
+- `PROV001` direct `[[raw/...]]` link inside a synthesis page (the one-hop provenance rule; `projects/` is exempt for its "Related sources" section).
+- `WIKI007` anchor-prose source-count mismatch on topic pages that use the "<N> sources anchor this page" convention.
+
+*Advisory (opt-in, never gates — `--report <name>`):* `orphans`, `symmetry`, `cross-links`, `tags`, `glossary-coverage`, `schema`, `duplicates`.
 
 ```
 python3 .claude/scripts/wiki-lint.py wiki/
 python3 .claude/scripts/wiki-lint.py wiki/ --gh-annotations   # CI form
 python3 .claude/scripts/wiki-lint.py --check table-pipe wiki/ # single rule
+python3 .claude/scripts/wiki-lint.py --report orphans         # advisory
 ```
 
-**CI** (`.github/workflows/wiki-lint.yml`) runs on push to `main` and on PRs whenever `wiki/**`, `.obsidian-linter.jsonc`, or either script change. Three gates: Layer 1 (markdownlint-obsidian), Layer 2 (`wiki-lint.py`), and the index drift check (`regenerate-index.py --check`). Any new error — or a drifted `wiki/index.md` — fails CI.
+**Gate 2b — `check-date-updated.py` (FM007, CI-only, git-aware).** Fails if a synthesis page's *body* changed in a commit/PR but `date_updated` was not bumped (scope: insights/topics/plans/projects). It needs git history, so it only runs in CI — it diffs against the PR base or the previous push. The Recent-updates callout is stripped before comparison, so a callout-only trim doesn't force a `date_updated` bump.
+
+**CI** (`.github/workflows/wiki-lint.yml`) runs on push to `main` and on PRs whenever `wiki/**`, `.obsidian-linter.jsonc`, or any of the three scripts change. Four gates: Layer 1 (markdownlint-obsidian), Layer 2 (`wiki-lint.py`), Gate 2b (`check-date-updated.py`, FM007), and the index drift check (`regenerate-index.py --check`). Any new error — or a drifted `wiki/index.md` — fails CI.
 
 **Carve-outs.** `backlog.md`, `glossary.md`, and `log.md` are ignored by Layer 1 due to a vendor `OFM901` auto-fix bug (see comment in `.obsidian-linter.jsonc`).
+
+**Toolchain maintenance.** `.claude/scripts/bump-markdownlint-obsidian.sh` pins/bumps the vendor CLI version and surfaces follow-up steps. Node is pinned in `.nvmrc`; run `nvm use` before `qmd`/`bunx` work if your shell is on the wrong version.
 
 ## Cross-Referencing Rules
 
