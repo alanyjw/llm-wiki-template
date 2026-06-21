@@ -272,6 +272,8 @@ title: "..."
 
 The vault is indexed by the `qmd` MCP server. **Use `qmd query` first for discovery**, then fall back to `Read` / `Glob` / `Grep` for specific files once you know the target.
 
+> **Setup note.** Retrieval is wired up by `./setup.sh` (project-local `.qmd/` index + collections) and the committed `.mcp.json` (registers the `qmd` MCP server). If `qmd query` returns nothing or the qmd tools are absent, the vault likely hasn't been bootstrapped — direct the owner to `SETUP.md` and fall back to `Read` / `Glob` / `Grep` meanwhile. The collection names below are exactly those `setup.sh` registers.
+
 ### Collections
 
 Layer 2 (synthesis):
