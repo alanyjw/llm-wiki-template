@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<!--
+  STORM briefing visualisation template - storm-research skill.
+
+  Self-contained: inline CSS only, no external fonts, scripts, or chart
+  libraries. Renders in both light and dark colour schemes via CSS variables -
+  fill the placeholders, never hardcode a colour, or you break one of the two.
+
+  To use: copy to docs/visualisations/YYYY-MM-DD-storm-{{slug}}.html, replace
+  every {{PLACEHOLDER}}, duplicate the blocks marked "repeat" as needed, then
+  delete these guide comments.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STORM: {{TOPIC}}</title>
+<style>
+  :root{
+    color-scheme: light dark;
+    --ink:#1a1d24; --muted:#5b6472; --line:#e2e6ec; --bg:#f6f7f9;
+    --card:#ffffff; --sunk:#eef1f5;
+    --accent:#2f6fed; --accent-soft:#eaf1fe; --accent-line:#cfe0fd;
+    --good:#1f8a55; --good-soft:#e7f6ee; --good-line:#bfe6cf;
+    --warn:#b4690e; --warn-soft:#fdf1e1;
+    --bad:#c0392b;  --bad-soft:#fcebe9;
+    --shadow:rgba(20,24,33,.05);
+    /* confidence-bar fills */
+    --fill-ink:#ffffff;
+    --hi-a:#27a06a; --hi-b:#1f8a55;
+    --mid-a:#d98a2b; --mid-b:#b4690e;
+    --lo-a:#d05546; --lo-b:#c0392b;
+    /* five persona accents */
+    --p1:#2f6fed; --p2:#1f8a55; --p3:#c0392b; --p4:#b4690e; --p5:#7c4dff;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --ink:#e6e9ef; --muted:#98a2b3; --line:#2a3040; --bg:#12151c;
+      --card:#1a1f29; --sunk:#242a36;
+      --accent:#7aa2ff; --accent-soft:#1b2740; --accent-line:#31456f;
+      --good:#57cf93; --good-soft:#152a20; --good-line:#27573d;
+      --warn:#e2a755; --warn-soft:#2a2114;
+      --bad:#ff8574;  --bad-soft:#2e1a18;
+      --shadow:rgba(0,0,0,.4);
+      --fill-ink:#12151c;
+      --hi-a:#3ad08f; --hi-b:#22a76e;
+      --mid-a:#f2b862; --mid-b:#d89533;
+      --lo-a:#ff9683; --lo-b:#e3624e;
+      --p1:#7aa2ff; --p2:#57cf93; --p3:#ff8574; --p4:#e2a755; --p5:#a78bfa;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:880px; margin:0 auto; padding:48px 24px 80px}
+  h1{font-size:30px; line-height:1.2; margin:0 0 6px; letter-spacing:-.02em}
+  .sub{color:var(--muted); margin:0 0 36px; font-size:15px}
+  h2{font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted);
+     margin:46px 0 14px; font-weight:700}
+  .card{background:var(--card); border:1px solid var(--line); border-radius:14px;
+        padding:22px 24px; box-shadow:0 1px 2px var(--shadow)}
+  .lead{font-size:18px; line-height:1.5}
+  .lead b{color:var(--accent)}
+  p{margin:0 0 14px} p:last-child{margin-bottom:0}
+  .muted{color:var(--muted)} small{font-size:12.5px}
+  code{background:var(--sunk); border-radius:5px; padding:1px 6px; font-size:13px;
+       font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+
+  /* confidence bars (findings, 1-10) */
+  .bars{display:flex; flex-direction:column; gap:13px}
+  .bar{display:grid; grid-template-columns:1fr 130px; gap:14px; align-items:start}
+  .bar .lab{font-size:14.5px; font-weight:600}
+  .bar .lab small{display:block; font-weight:500; color:var(--muted); margin-top:3px}
+  .bar .track{background:var(--sunk); border-radius:7px; height:26px; overflow:hidden;
+              position:relative; align-self:center}
+  .bar .fill{height:100%; border-radius:7px; display:flex; align-items:center; justify-content:flex-end;
+             padding-right:8px; color:var(--fill-ink); font-size:12px; font-weight:700}
+  .c-hi{background:linear-gradient(90deg,var(--hi-a),var(--hi-b))}    /* 8-10 */
+  .c-mid{background:linear-gradient(90deg,var(--mid-a),var(--mid-b))} /* 5-7  */
+  .c-lo{background:linear-gradient(90deg,var(--lo-a),var(--lo-b))}    /* 1-4  */
+  @media (max-width:560px){
+    .bar{grid-template-columns:1fr; gap:6px}
+    .bar .track{width:100%}
+  }
+
+  /* five-perspective cards */
+  .perspectives{display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:14px}
+  .persona{background:var(--card); border:1px solid var(--line); border-top-width:4px;
+           border-radius:12px; padding:16px 18px}
+  .persona h3{margin:0 0 2px; font-size:15px}
+  .persona .role{font-size:12px; color:var(--muted); margin:0 0 10px}
+  .persona p{font-size:13.5px; margin:0 0 9px}
+  .persona .only{font-size:12.5px; background:var(--sunk); border-radius:8px; padding:8px 10px; margin:0}
+  .persona .only b{font-size:11px; text-transform:uppercase; letter-spacing:.04em;
+                   color:var(--muted); display:block; margin-bottom:2px}
+
+  /* contradiction map */
+  .clash{background:var(--card); border:1px solid var(--line); border-left:4px solid var(--bad);
+         border-radius:10px; padding:13px 16px; margin-bottom:10px}
+  .clash .vs{font-size:12px; font-weight:700; color:var(--bad); text-transform:uppercase; letter-spacing:.04em}
+  .callout{border-radius:12px; padding:16px 18px; margin-top:12px}
+  .callout.agree{background:var(--good-soft); border:1px solid var(--good-line)}
+  .callout.blind{background:var(--accent-soft); border:1px solid var(--accent-line)}
+  .callout b{display:block; font-size:11px; text-transform:uppercase; letter-spacing:.06em; margin-bottom:5px}
+  .callout.agree b{color:var(--good)} .callout.blind b{color:var(--accent)}
+
+  /* scorecard table */
+  .scroll{overflow-x:auto}
+  table{width:100%; border-collapse:collapse; font-size:14px; min-width:420px}
+  th,td{text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); vertical-align:top}
+  th{font-size:11.5px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted)}
+  tr:last-child td{border-bottom:none}
+  .tag{display:inline-block; font-size:11px; font-weight:700; border-radius:999px; padding:2px 9px}
+  .tag.hi{background:var(--good-soft); color:var(--good)}
+  .tag.mid{background:var(--warn-soft); color:var(--warn)}
+  .tag.lo{background:var(--bad-soft); color:var(--bad)}
+
+  /* verify checklist + footer */
+  .verify li{margin-bottom:9px}
+  .insight{margin-top:14px; border-color:var(--accent-line); background:var(--accent-soft)}
+  .foot{margin-top:48px; color:var(--muted); font-size:12.5px; border-top:1px solid var(--line); padding-top:16px}
+  .foot a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>STORM: {{TOPIC}}</h1>
+  <p class="sub">{{ROLE LENS}} &middot; personas: {{P1, P2, P3, P4, P5}} &middot; grounded: {{yes (N wiki pages) / no}} &middot; {{YYYY-MM-DD}}</p>
+
+  <!-- 60-second summary: one paragraph, bold the load-bearing phrases with <b> -->
+  <div class="card lead">{{ONE-PARAGRAPH SUMMARY}}</div>
+
+  <h2>Key findings &mdash; ranked by reliability</h2>
+  <div class="bars">
+    <!-- repeat per finding: width = confidence x 10%, class c-hi (8-10) / c-mid (5-7) / c-lo (1-4) -->
+    <div class="bar">
+      <div class="lab">{{FINDING}} <small>supported: {{PERSONAS}} &middot; challenged: {{PERSONAS}}</small></div>
+      <div class="track"><div class="fill c-hi" style="width:90%">9/10</div></div>
+    </div>
+    <div class="bar">
+      <div class="lab">{{FINDING}} <small>supported: {{PERSONAS}} &middot; challenged: {{PERSONAS}}</small></div>
+      <div class="track"><div class="fill c-mid" style="width:60%">6/10</div></div>
+    </div>
+    <div class="bar">
+      <div class="lab">{{FINDING}} <small>supported: {{PERSONAS}} &middot; challenged: {{PERSONAS}}</small></div>
+      <div class="track"><div class="fill c-lo" style="width:30%">3/10</div></div>
+    </div>
+  </div>
+
+  <div class="card insight">
+    <b style="color:var(--accent)">ACTIONABLE INSIGHT ({{ROLE}})</b>
+    <p style="margin-top:6px">{{WHAT TO ACTUALLY DO DIFFERENTLY - SPECIFIC}}</p>
+  </div>
+
+  <h2>The five perspectives</h2>
+  <div class="perspectives">
+    <!-- repeat x5: set border-top-color to var(--p1) ... var(--p5) -->
+    <div class="persona" style="border-top-color:var(--p1)">
+      <h3>{{PERSONA NAME}}</h3>
+      <p class="role">{{ONE-LINE ROLE}}</p>
+      <p>{{CORE POSITION - 2 SENTENCES}}</p>
+      <p class="only"><b>Only they would say</b>{{THE UNIQUE CONTRIBUTION}}</p>
+    </div>
+    <div class="persona" style="border-top-color:var(--p2)">
+      <h3>{{PERSONA NAME}}</h3>
+      <p class="role">{{ONE-LINE ROLE}}</p>
+      <p>{{CORE POSITION - 2 SENTENCES}}</p>
+      <p class="only"><b>Only they would say</b>{{THE UNIQUE CONTRIBUTION}}</p>
+    </div>
+    <div class="persona" style="border-top-color:var(--p3)">
+      <h3>{{PERSONA NAME}}</h3>
+      <p class="role">{{ONE-LINE ROLE}}</p>
+      <p>{{CORE POSITION - 2 SENTENCES}}</p>
+      <p class="only"><b>Only they would say</b>{{THE UNIQUE CONTRIBUTION}}</p>
+    </div>
+    <div class="persona" style="border-top-color:var(--p4)">
+      <h3>{{PERSONA NAME}}</h3>
+      <p class="role">{{ONE-LINE ROLE}}</p>
+      <p>{{CORE POSITION - 2 SENTENCES}}</p>
+      <p class="only"><b>Only they would say</b>{{THE UNIQUE CONTRIBUTION}}</p>
+    </div>
+    <div class="persona" style="border-top-color:var(--p5)">
+      <h3>{{PERSONA NAME}}</h3>
+      <p class="role">{{ONE-LINE ROLE}}</p>
+      <p>{{CORE POSITION - 2 SENTENCES}}</p>
+      <p class="only"><b>Only they would say</b>{{THE UNIQUE CONTRIBUTION}}</p>
+    </div>
+  </div>
+
+  <h2>Where they clash &mdash; contradiction map</h2>
+  <!-- repeat per clash -->
+  <div class="clash">
+    <span class="vs">{{PERSONA A}} vs {{PERSONA B}}</span>
+    <p style="margin:6px 0 0">{{THE SPECIFIC CLAIMS THAT CLASH}}</p>
+  </div>
+  <div class="clash">
+    <span class="vs">{{PERSONA C}} vs {{PERSONA D}}</span>
+    <p style="margin:6px 0 0">{{THE SPECIFIC CLAIMS THAT CLASH}}</p>
+  </div>
+  <div class="callout agree"><b>Everyone agrees (likely true)</b>{{THE SHARED CLAIM}}</div>
+  <div class="callout blind"><b>Nobody addressed (field blind spot)</b>{{THE UNEXAMINED ANGLE - OFTEN THE MOST VALUABLE FINDING}}</div>
+
+  <h2>Peer-review scorecard</h2>
+  <div class="card scroll" style="padding:6px 10px">
+  <table>
+    <tr><th>Check</th><th>Read</th></tr>
+    <tr><td>Weakest link</td><td>{{LEAST-CONFIDENT CLAIM + WHAT WOULD VERIFY IT}}</td></tr>
+    <tr><td>Bias check</td><td>{{WHICH VOICE DOMINATED THE SYNTHESIS}}</td></tr>
+    <tr><td>Missing perspective</td><td>{{6TH ANGLE, OR "NONE"}}</td></tr>
+    <tr><td>Overall grade</td><td><span class="tag hi">{{GRADE}}</span> {{WHAT TO FIX}}</td></tr>
+  </table>
+  </div>
+
+  <h2>To verify externally <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:500">&mdash; nothing above is a citation</span></h2>
+  <div class="card"><ul class="verify" style="margin:0; padding-left:20px">
+    <!-- repeat per low-confidence claim -->
+    <li>{{LOW-CONFIDENCE CLAIM}} &mdash; <span class="muted">{{WHY IT NEEDS LIVE SOURCING}}</span></li>
+    <li>{{LOW-CONFIDENCE CLAIM}} &mdash; <span class="muted">{{WHY IT NEEDS LIVE SOURCING}}</span></li>
+  </ul></div>
+
+  <p class="foot">Generated by the <code>storm-research</code> skill (Stanford STORM, NAACL 2024) &middot; full briefing + appendix in <code>raw/research/{{YYYY-MM-DD-slug}}.md</code> &middot; method: <a href="https://storm.genie.stanford.edu/">storm.genie.stanford.edu</a></p>
+
+</div>
+</body>
+</html>
