@@ -73,6 +73,8 @@ add_collection captures     ./raw/captures
 add_collection briefings    ./raw/briefings
 add_collection claude-chats ./raw/claude-chats
 add_collection projects     ./raw/projects
+add_collection research     ./raw/research
+add_collection authored     ./raw/authored
 
 # --- 4. Index + embed ---------------------------------------------------------
 
