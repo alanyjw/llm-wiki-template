@@ -1,0 +1,81 @@
+# denylist.example.txt - template for .claude/scripts/denylist.txt
+#
+# Used by .claude/scripts/leak-scan.py, the privacy gate you run before every
+# public push of a sanitized copy of your vault.
+#
+#   cp .claude/scripts/denylist.example.txt .claude/scripts/denylist.txt
+#   # fill in the real terms
+#   python3 .claude/scripts/leak-scan.py ../public-repo-dir
+#
+# denylist.txt is gitignored and MUST STAY THAT WAY. It names real people, so
+# publishing it publishes the very thing it exists to protect. This example
+# file is the only one that ships; every entry below is fake.
+#
+# Syntax
+#   [words]        one section header, then one term per line
+#   [substrings]   the other section header
+#   # comment      full-line comments only - a `#` mid-line is part of the term,
+#                  because handles and paths legitimately contain one
+#   blank lines    ignored
+#
+# The two sections are matched differently, on purpose.
+
+
+# ---------------------------------------------------------------------------
+# [words] - bare proper nouns. CASE-SENSITIVE, matched on word boundaries.
+# ---------------------------------------------------------------------------
+# First names, surnames, short org acronyms, product codenames - anything
+# short enough to collide with ordinary English.
+#
+# Case sensitivity is what keeps `Mark`, `Will`, `Grace`, `Bill` and `Art` from
+# firing on the ordinary words `mark`, `will`, `grace`, `bill`, `art`. The word
+# boundary is what keeps a three-letter acronym from firing inside unrelated
+# longer words. A denylist that false-positives on every third file gets
+# ignored, which is the same as not having one - so keep this section tight and
+# push anything ambiguous down into [substrings].
+#
+# Terms shorter than two characters are rejected by the loader.
+
+[words]
+Jane
+Doe
+Acme
+Contoso
+Northwind
+
+
+# ---------------------------------------------------------------------------
+# [substrings] - multi-word terms, paths, handles, repo names.
+# CASE-INSENSITIVE, matched anywhere in a line.
+# ---------------------------------------------------------------------------
+# Full names, employer names, team names, social handles, your home directory,
+# and the names of personal side repos your skills shell out to. These are
+# distinctive enough that a substring hit is almost always a real leak, so
+# match them loosely.
+#
+# Worth listing here and easy to forget:
+#   - the private vault's own directory name, as it appears in absolute paths
+#     and in the mangled form tooling writes into cache paths
+#   - side repos referenced by your skills (importers, transcribers, exporters)
+#   - internal system, tool and codename vocabulary
+#   - former employers, clients, schools
+#   - anything an LLM would recognize as "your" phrasing: an in-house acronym,
+#     a team ritual name, a room name
+
+[substrings]
+Jane Doe
+J. Doe
+@janedoe
+jane.doe@
+Acme Corp
+Acme Corporation
+Northwind Traders
+/Users/janedoe
+janedoe
+janes-vault
+janes-second-brain
+acme-internal-tools
+kindle-exporter
+transcribe-pipeline
+Project Bluebird
+The Loft

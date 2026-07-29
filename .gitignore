@@ -25,3 +25,8 @@ node_modules/**
 
 # Git worktrees — isolated per-task workspaces, never tracked
 .claude/worktrees/
+
+# Privacy-gate denylist for .claude/scripts/leak-scan.py. It names real people,
+# employers, handles and home paths — committing it publishes the very list it
+# exists to protect. Only denylist.example.txt is ever tracked.
+.claude/scripts/denylist.txt

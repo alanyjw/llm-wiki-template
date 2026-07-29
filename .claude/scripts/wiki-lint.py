@@ -59,7 +59,10 @@ Checks the vendor tool (markdownlint-obsidian) can't do correctly today:
        python3 .claude/scripts/wiki-lint.py --report cross-links
    Recommended during ingest review for new sources; not a default gate.
 
-Reports (separate flags, not run by default):
+Reports (separate flags, not run by default). Two reasons they stay out of CI:
+they are judgement calls rather than contract violations, AND `symmetry` /
+`duplicates` are O(N^2) walks over the page set — around 30s on a mid-size vault,
+which is real money to pay on every push for output nobody reads per-commit.
 
 - `--report symmetry`          — cross-reference symmetry analysis (advisory)
 - `--report orphans`           — orphan page detection (advisory)
@@ -123,6 +126,8 @@ REQUIRED_KEYS_BY_TYPE: dict[str, list[str]] = {
     "glossary-split": [],
     "backlog": [],
     "digest": [],
+    "manifest": [],
+    "reflections-log": [],
 }
 
 RECOMMENDED_KEYS_BY_TYPE: dict[str, list[str]] = {
@@ -1126,6 +1131,8 @@ def report_orphans(vault_root: Path) -> int:
         "wiki/glossary/vernacular.md",
         "wiki/log.md",
         "wiki/backlog.md",
+        "wiki/reflections-log.md",
+        "wiki/notes-import-manifest.md",
     }
 
     # Build wiki page set
@@ -1184,6 +1191,10 @@ def report_symmetry(vault_root: Path) -> int:
     For each source page S, find every [[entities/X]] reference in S's body.
     Then check entity X's Appears-In contains a link to S. Asymmetric pairs
     are listed (advisory — entities curate Appears-In, so this is hint-only).
+
+    Cost: this reads every source and every entity page and cross-joins them —
+    O(N^2) in practice, ~30s on a mid-size vault. That runtime is why it is a
+    manual report and not a CI gate.
     """
     wiki_root = vault_root / "wiki"
     sources_dir = wiki_root / "sources"

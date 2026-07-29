@@ -20,47 +20,94 @@ on:
       - '.github/workflows/wiki-lint.yml'
   workflow_dispatch: {}
 
+# Least privilege: this workflow only reads the repo. No writes, no packages,
+# no id-token. Declared at the top level so every job inherits it.
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Lint wiki/
     runs-on: ubuntu-latest
     steps:
+      # Third-party actions are pinned to a full commit SHA, not a tag — tags
+      # are mutable and a compromised upstream can repoint v5 at new code.
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0  # full history needed for the FM007 date_updated diff
 
       # Layer 1: vendor CLI (markdownlint-obsidian) — pinned.
       # Catches OFM frontmatter / tag / callout / embed rules + standard
       # markdownlint. Gates the build.
-      # Note: backlog/glossary/log are carved out via .obsidian-linter.jsonc
-      # ignores due to vendor OFM901 auto-fix bug — see comment there.
+      # Every file under wiki/ is linted — there are NO per-file carve-outs.
+      # .obsidian-linter.jsonc only ignores whole non-wiki trees (raw/, assets/,
+      # templates/, prompts/) and disables individual *rules* repo-wide; it never
+      # exempts a specific page. Per-rule rationale lives in that file's header.
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: '1.3.10'
 
+      # NOTE: no `--bun` flag. The transitive dep markdown-flavor-detection@^0.7.3
+      # declares a `"bun": "./src/node.ts"` export condition but ships only dist/
+      # (no src/), so `bunx --bun` resolves the `bun` condition to an unpublished
+      # file and dies with "Cannot find module 'markdown-flavor-detection/node'".
+      # Without --bun, bunx uses the `import` condition -> dist/node.js
+      # (published) and lints identically. Do not re-add --bun until the vendor
+      # ships src/ in the published tarball.
       - name: Layer 1 — markdownlint-obsidian (gates the build)
         id: layer1
         run: |
-          bunx --bun markdownlint-obsidian-cli@1.1.0 "wiki/**/*.md" --vault-root wiki
+          bunx markdownlint-obsidian-cli@1.1.0 "wiki/**/*.md" --vault-root wiki
 
       # Layer 2: vault-specific Python script — GATES the build.
-      # Hard gates (errors fail CI):
-      #   - WIKI001 — table-pipe-in-wikilink (Obsidian table-cell breakage)
+      # The script exits 1 if and only if at least one ERROR-severity finding
+      # fires; WARNING-severity findings are printed (and annotated) but exit 0.
+      # Severity is assigned per finding in .claude/scripts/wiki-lint.py via the
+      # SEVERITY_ERROR / SEVERITY_WARNING constants — grep `severity=` there to
+      # confirm this list rather than trusting the comment.
+      #
+      # ERRORS — these fail CI:
+      #   - WIKI001 — table-pipe-in-wikilink (breaks the Obsidian table cell)
       #   - WIKI002 — broken wikilink (Obsidian-fuzzy resolution)
-      #   - WIKI003 — broken wikilink #anchor
-      #   - FM001..FM004 — per-type required frontmatter
-      #   - FM005 — raw_sources path must exist in the repo
-      #   - RU001..RU003 — Recent-updates callout discipline on
-      #                    insights/topics/plans/projects
-      # Soft gates (warnings — don't fail CI):
-      #   - FM006 — recommended frontmatter keys (date_ingested, source_count, …)
-      #   - RU004 — Recent-updates callout holds >3 entries (older roll off)
+      #   - WIKI003 — broken wikilink #anchor (no such heading / glossary term)
+      #   - FM001  — synthesis page has no frontmatter block at all
+      #   - FM004  — a *registered* page type is missing a required key
+      #   - FM005  — a raw_sources path does not resolve on disk
+      #   - RU001  — Recent-updates callout missing on an
+      #              insight/topic/plan/project page
+      #   - IO001  — a file under wiki/ could not be read/decoded
+      #
+      # WARNINGS — reported, but the script still exits 0:
+      #   - FM002  — frontmatter present but no `type:` key. NOTE: this is only a
+      #              warning, and it also *short-circuits* the per-type schema
+      #              check — a page with no `type:` is never FM004-gated, so an
+      #              untyped page can carry zero required keys and still pass CI.
+      #   - FM003  — unknown `type:` (no schema registered); same short-circuit
+      #   - FM006  — recommended frontmatter keys (date_ingested, source_count, ...)
+      #   - RU002  — Recent-updates callout present but holds no dated entry
+      #   - RU003  — newest callout entry is older than frontmatter date_updated
+      #   - RU004  — callout holds more than 3 entries (older ones roll off)
       #   - PROV001 — direct [[raw/...]] link in a synthesis page (one-hop
       #               provenance rule; projects/ exempt for Related-sources)
       #   - WIKI007 — anchor-prose source-count mismatch on topic pages
+      #
+      # Warnings are not free passes — FM002/FM003 in particular mean a page is
+      # silently exempt from schema enforcement. Treat a clean run as zero of
+      # both severities; the gate is just the floor.
       # Stdlib only — no setup-python deps needed.
+      #
+      # Deliberately NOT wired in here: the advisory reports
+      # (`--report orphans`, `--report symmetry`, `--report duplicates`, ...).
+      # Two reasons, and the second is the one people forget:
+      #   1. They are judgement calls, not contract violations — some asymmetry
+      #      and some orphans are intentional, so gating on them trains people
+      #      to add noise-suppressing links rather than real ones.
+      #   2. They are slow. `symmetry` and `duplicates` are O(N^2) walks over
+      #      the page set — measured at roughly 30s on a mid-size vault, paid on
+      #      every push, for output nobody reads per-commit. Run them on demand
+      #      during a lint pass instead.
       - name: Layer 2 — wiki-lint.py (gates the build)
         id: layer2
         run: |
@@ -70,6 +117,8 @@ jobs:
       # page's body changed in this commit/PR but date_updated was not bumped.
       # Scope: wiki/insights/, wiki/topics/, wiki/plans/, wiki/projects/.
       # Skipped on workflow_dispatch (no base SHA) and initial branch pushes.
+      # Context values are passed through `env:` rather than interpolated into
+      # the run block, so untrusted values can never be evaluated as shell.
       - name: Layer 2b — date_updated freshness (FM007, CI-only)
         id: date_updated_check
         env:

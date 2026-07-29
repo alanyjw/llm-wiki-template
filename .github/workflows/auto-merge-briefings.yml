@@ -1,0 +1,323 @@
+name: auto-merge-briefings
+
+# ---------------------------------------------------------------------------
+# OPT-IN. This workflow does nothing until you switch it on.
+#
+# Why it exists: if you run the daily-briefing / weekly-digest skills from a
+# scheduled or cloud session, each run opens a pull request. Those PRs only
+# touch raw/briefings/ — generated, forward-looking todo files that sit outside
+# every lint gate and are re-derived tomorrow anyway. There is nothing to
+# review, so 7+ merge clicks a week is pure paper cut. This workflow squash-
+# merges exactly that class of PR and nothing else.
+#
+# HOW TO ENABLE
+#   GitHub → repo Settings → Secrets and variables → Actions → Variables tab
+#   → New repository variable
+#       Name:  ENABLE_BRIEFING_AUTOMERGE
+#       Value: true
+#   Any other value (or an unset variable) leaves the job skipped. To turn it
+#   back off, change the value or delete the variable — no file edit needed.
+#
+# HOW TO DISABLE PERMANENTLY
+#   Delete this file. Nothing else in the template depends on it.
+#
+# WHAT IT WILL NOT DO
+#   It never merges a PR that touches anything outside the allowlist below,
+#   never merges a fork PR, never merges a draft, and never force-merges past
+#   branch protection. Every one of those cases falls through to normal review
+#   with a green check and an explanatory notice — no auto-merge is the safe
+#   outcome, and it is also the default outcome whenever anything is unclear.
+#
+# NOTE ON LINTING: raw/briefings/ is outside the wiki-lint.yml path filter, so
+# wiki-lint does not run on a briefings-only PR. That is deliberate (there is
+# no wiki/ content to lint), but it means "auto-merged" does not imply "linted".
+# If you want a second layer, enable branch protection on main with wiki-lint
+# as a required check — this workflow uses the normal merge API, so protection
+# rules still apply and a blocked merge is logged as a warning, not bypassed.
+# ---------------------------------------------------------------------------
+
+on:
+  pull_request:
+    branches: [main]
+    # Cheap pre-filter only: "at least one file under raw/briefings/ changed".
+    # This is NOT the security check — a PR touching raw/briefings/ AND wiki/
+    # still triggers this workflow and is then rejected by the allowlist below.
+    # GitHub does not allow expressions here, so if you widen ALLOWED_PATH_
+    # PREFIXES you must widen this list by hand too. Forgetting to means the
+    # workflow simply never fires — fail-closed in the safe direction.
+    paths:
+      - 'raw/briefings/**'
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# ===========================================================================
+# CONFIGURATION — the only block most people should edit.
+# ===========================================================================
+#
+#   *** THIS IS A TRUST BOUNDARY. ***
+#
+# Everything an automated session can put inside ALLOWED_PATH_PREFIXES lands on
+# main with no human reading it. The defaults are safe because raw/briefings/
+# holds only generated, disposable output. Widening the allowlist changes what
+# this workflow *is*:
+#
+#   - adding `wiki/`       → an automated session can rewrite your synthesis
+#                            layer — the actual knowledge base — unreviewed
+#   - adding `.github/`    → an automated session can rewrite this file, the
+#                            lint gates, and the permissions above; a single
+#                            unreviewed commit can grant itself anything
+#   - adding `.claude/`    → an automated session can rewrite the skills and
+#                            lint scripts that constrain future sessions
+#   - adding `raw/`        → every immutable source becomes machine-writable
+#   - adding `/` or `''`   → every path matches; the allowlist is off entirely
+#
+# Keep this list as narrow as the thing you actually want automated. If you are
+# unsure whether a path belongs here, it does not.
+#
+env:
+  # Head branches eligible for auto-merge. Comma-separated; a branch qualifies
+  # if it starts with any entry. `claude/` is what Claude Code cloud sessions
+  # create; change it to match whatever opens your generated PRs (e.g.
+  # `automation/`, `bot/`). An empty value disables the workflow.
+  ALLOWED_BRANCH_PREFIXES: 'claude/'
+
+  # Path allowlist. Comma-separated. EVERY changed file in the PR must start
+  # with one of these, or no merge happens. Each entry MUST end with `/` — the
+  # job hard-fails otherwise, because a bare `raw/briefings` would also match
+  # an unrelated `raw/briefings-private/` sibling.
+  ALLOWED_PATH_PREFIXES: 'raw/briefings/'
+
+  # Anomaly brake. A briefing PR is 1-3 files; a batch-ingest receipt run is a
+  # handful more. A PR with more changed files than this is treated as
+  # unexpected and left for review even if every path is allowlisted.
+  MAX_CHANGED_FILES: '25'
+
+  # 'squash' | 'merge' | 'rebase'. Squash keeps one commit per briefing day.
+  MERGE_METHOD: 'squash'
+
+  # 'true' deletes the head branch after a successful merge. Best-effort — a
+  # cleanup failure is logged, never fatal.
+  DELETE_BRANCH_AFTER_MERGE: 'true'
+
+# One run per PR at a time. A `synchronize` event (new commit pushed to the head
+# branch) starts a fresh run; without this block the older run would keep going
+# in parallel against a diff that no longer exists. The merge call is pinned to
+# the validated head SHA as well, so this is the second of two independent
+# guards against the same race — belt and braces on purpose.
+concurrency:
+  group: automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# Default-deny at the workflow level; the single job below grants itself the
+# narrow write scopes it actually uses. Declaring permissions at all zeroes
+# every scope that is not listed.
+permissions: {}
+
+jobs:
+  automerge:
+    name: Auto-merge briefing-only PR
+    # Master switch. `vars` is one of the few contexts allowed in a job-level
+    # `if:` (workflow `env` is not), which is why the enable flag is a
+    # repository variable rather than another entry in the block above.
+    if: vars.ENABLE_BRIEFING_AUTOMERGE == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # merge the PR; delete the head branch ref
+      pull-requests: write   # read the changed-file list; close via merge
+    steps:
+      # No checkout step: this job never reads repository contents, only the
+      # PR's file list. Third-party actions are pinned to a full commit SHA,
+      # not a tag — tags are mutable and a compromised upstream can repoint
+      # v7 at new code.
+      #
+      # Injection safety: the only `${{ }}` expressions below are the literal
+      # config constants from the env block. Attacker-controllable values —
+      # branch name, PR title, PR body — are NEVER interpolated into the script
+      # text; they are read at runtime as JS values off `context.payload`
+      # (e.g. `pr.head.ref`), where they are data and can never become code.
+      # Do not "simplify" any of those into `${{ github.head_ref }}`.
+      - name: Verify allowlist, then merge or stand down
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          ALLOWED_BRANCH_PREFIXES: ${{ env.ALLOWED_BRANCH_PREFIXES }}
+          ALLOWED_PATH_PREFIXES: ${{ env.ALLOWED_PATH_PREFIXES }}
+          MAX_CHANGED_FILES: ${{ env.MAX_CHANGED_FILES }}
+          MERGE_METHOD: ${{ env.MERGE_METHOD }}
+          DELETE_BRANCH_AFTER_MERGE: ${{ env.DELETE_BRANCH_AFTER_MERGE }}
+        with:
+          script: |
+            // ---------------------------------------------------------------
+            // FAIL-CLOSED CONTRACT
+            //
+            // This script has exactly one path that merges. Every other path —
+            // including every error, every ambiguity, and every case the author
+            // did not anticipate — reaches `standDown()` and leaves the PR for
+            // a human. There is no "merge unless" branch anywhere below; only a
+            // "stand down unless every check passed" one.
+            // ---------------------------------------------------------------
+
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+
+            /** The only non-merging exit. Green check, PR left for review. */
+            const standDown = (why) => {
+              core.notice(`No auto-merge: ${why} Leaving this PR for manual review.`);
+            };
+
+            const parseList = (raw) =>
+              String(raw || '')
+                .split(',')
+                .map((s) => s.trim())
+                .filter(Boolean);
+
+            // --- Config load + validation ---------------------------------
+            // A malformed allowlist is a maintainer bug, not a PR problem, so
+            // it fails the job loudly instead of standing down quietly.
+            const branchPrefixes = parseList(process.env.ALLOWED_BRANCH_PREFIXES);
+            const pathPrefixes = parseList(process.env.ALLOWED_PATH_PREFIXES);
+            const maxFiles = Number.parseInt(process.env.MAX_CHANGED_FILES, 10);
+            const mergeMethod = String(process.env.MERGE_METHOD || '').trim();
+            const deleteBranch =
+              String(process.env.DELETE_BRANCH_AFTER_MERGE || '').trim() === 'true';
+
+            if (branchPrefixes.length === 0 || pathPrefixes.length === 0) {
+              return standDown('ALLOWED_BRANCH_PREFIXES or ALLOWED_PATH_PREFIXES is empty.');
+            }
+            const unterminated = pathPrefixes.filter((p) => !p.endsWith('/'));
+            if (unterminated.length > 0) {
+              core.setFailed(
+                `Config error: every ALLOWED_PATH_PREFIXES entry must end with "/" ` +
+                `(got: ${unterminated.join(', ')}). Without the trailing slash, ` +
+                `"raw/briefings" would also match "raw/briefings-private/".`
+              );
+              return;
+            }
+            const wildcard = pathPrefixes.filter((p) => p === '/' || p === './');
+            if (wildcard.length > 0) {
+              core.setFailed(
+                'Config error: ALLOWED_PATH_PREFIXES contains a root-wildcard entry, ' +
+                'which would allow auto-merging any file in the repository. Refusing.'
+              );
+              return;
+            }
+            if (!Number.isInteger(maxFiles) || maxFiles < 1) {
+              core.setFailed(`Config error: MAX_CHANGED_FILES must be a positive integer.`);
+              return;
+            }
+            if (!['squash', 'merge', 'rebase'].includes(mergeMethod)) {
+              core.setFailed(
+                `Config error: MERGE_METHOD must be squash | merge | rebase (got "${mergeMethod}").`
+              );
+              return;
+            }
+
+            // --- Gate 1: the PR itself must be an ordinary, mergeable PR ---
+            if (!pr) {
+              return standDown('no pull_request payload on this event.');
+            }
+            if (pr.draft) {
+              return standDown('the PR is still a draft.');
+            }
+            if (pr.state !== 'open') {
+              return standDown(`the PR state is "${pr.state}", not open.`);
+            }
+            // Fork PRs carry untrusted content and must always be read by a
+            // human, regardless of which paths they touch. Phrased as positive
+            // proof of same-repo origin: `head.repo` is null when the source
+            // repository was deleted, made private or blocked after the PR was
+            // opened, and an unknown origin is unprovable, therefore not
+            // mergeable. Do not relax this back to `pr.head.repo && ...`.
+            if (!pr.head.repo || pr.head.repo.full_name !== pr.base.repo.full_name) {
+              const origin = pr.head.repo ? pr.head.repo.full_name : 'unknown/deleted';
+              return standDown(`the PR head repo is not this repo (${origin}).`);
+            }
+
+            // --- Gate 2: head branch prefix -------------------------------
+            const headRef = pr.head.ref;
+            if (!branchPrefixes.some((p) => headRef.startsWith(p))) {
+              return standDown(
+                `branch "${headRef}" does not start with any of: ${branchPrefixes.join(', ')}.`
+              );
+            }
+
+            // --- Gate 3: EVERY changed file must be inside the allowlist ---
+            // The file list below describes ONE commit: pr.head.sha, captured
+            // here and passed to the merge call. Anything pushed to the head
+            // branch after this point is a different commit and must not ride
+            // in on this run's approval.
+            const headSha = pr.head.sha;
+            const pull_number = pr.number;
+            let files;
+            try {
+              files = await github.paginate(github.rest.pulls.listFiles, {
+                owner, repo, pull_number, per_page: 100,
+              });
+            } catch (e) {
+              // Cannot enumerate the diff => cannot prove it is safe => no merge.
+              return standDown(`could not list changed files (${e.message}).`);
+            }
+
+            if (files.length === 0) {
+              return standDown('the PR reports zero changed files.');
+            }
+            if (files.length > maxFiles) {
+              return standDown(
+                `the PR changes ${files.length} files, above the MAX_CHANGED_FILES brake of ${maxFiles}.`
+              );
+            }
+
+            const isAllowed = (name) => {
+              if (typeof name !== 'string' || name.length === 0) return false;
+              // Defensive: reject absolute paths and any traversal segment
+              // before the prefix test, so a crafted name cannot escape.
+              if (name.startsWith('/') || name.split('/').includes('..')) return false;
+              return pathPrefixes.some((p) => name.startsWith(p));
+            };
+
+            // A rename must be allowlisted at BOTH ends — otherwise a file could
+            // be moved out of a protected tree into raw/briefings/ unreviewed.
+            const offenders = [];
+            for (const f of files) {
+              if (!isAllowed(f.filename)) offenders.push(f.filename);
+              if (f.previous_filename && !isAllowed(f.previous_filename)) {
+                offenders.push(`${f.previous_filename} (renamed from)`);
+              }
+            }
+            if (offenders.length > 0) {
+              return standDown(
+                `${offenders.length} file(s) fall outside the allowlist ` +
+                `[${pathPrefixes.join(', ')}]: ${offenders.join(', ')}.`
+              );
+            }
+
+            // --- All gates passed: the single merging path -----------------
+            // `sha` pins the merge to the exact commit whose diff was just
+            // proven allowlisted. Without it GitHub merges whatever the head
+            // ref points at *at merge time*, so a commit pushed between
+            // listFiles and here would land unreviewed carrying any path at
+            // all. GitHub answers 409 when the head has moved, which falls into
+            // the catch below and degrades to manual review — fail-closed.
+            try {
+              await github.rest.pulls.merge({
+                owner, repo, pull_number, merge_method: mergeMethod, sha: headSha,
+              });
+              core.notice(
+                `PR #${pull_number} auto-merged at ${headSha} (${files.length} file(s), ` +
+                `all within ${pathPrefixes.join(', ')}).`
+              );
+            } catch (e) {
+              // Branch protection, a required check still running, a conflict,
+              // or the head moved after validation (409).
+              // Never retried, never forced — a human finishes it.
+              core.warning(
+                `Auto-merge of PR #${pull_number} at ${headSha} was refused by GitHub: ` +
+                `${e.message}. Merge it manually once the blocker clears.`
+              );
+              return;
+            }
+
+            if (!deleteBranch) return;
+            try {
+              await github.rest.git.deleteRef({ owner, repo, ref: `heads/${headRef}` });
+            } catch (e) {
+              core.info(`Branch cleanup skipped for ${headRef}: ${e.message}`);
+            }

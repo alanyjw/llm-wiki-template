@@ -81,6 +81,8 @@ After --apply, manual follow-ups the vault owner should review:
    in $CONFIG — issue #28 OFM901 fix is in ${PIN_TARGET}.
 2. Add \`"wikilinks": { "resolveMode": "obsidian-fuzzy", "caseSensitive": false, "allowAlias": true }\`
    alongside top-level \`vaultRoot\` so we can re-enable OFM001 — issue #27 feature is in ${PIN_TARGET}.
-3. Run the workflow locally:  bunx --bun markdownlint-obsidian-cli@${PIN_TARGET} "wiki/**/*.md" --vault-root wiki
+3. Run the workflow locally:  npx markdownlint-obsidian-cli@${PIN_TARGET} "wiki/**/*.md" --vault-root wiki
+   (no \`--bun\` — the flag resolves a transitive dep's unpublished \`bun\` export
+   condition and dies; see the NOTE in .github/workflows/wiki-lint.yml)
 4. Commit + push.
 EOF
