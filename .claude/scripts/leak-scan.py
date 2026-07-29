@@ -454,8 +454,26 @@ def read_blobs(root, shas):
 
 
 def scan_commit_metadata(root, denylist):
-    """Author/committer names, emails, subjects, bodies and ref names."""
+    """Commit messages, ref names, and a census of author/committer identities.
+
+    Messages get the full rule set - an accidental mention of an employer or a
+    real name in a commit subject is a genuine leak, and one that a worktree
+    scan can never see.
+
+    Identities are deliberately NOT run through the regex rules. Every commit
+    necessarily carries an author and committer email, so the generic email
+    rule fires on all of them: the gate would report findings on a provably
+    clean repo, and a gate that always fails is a gate that gets ignored. What
+    actually matters is the SET of identities - one expected address is fine,
+    an unexpected second one is the signal - so they are reported as a census
+    for a human to confirm. The denylist still applies: an address you listed
+    explicitly is a hard finding wherever it appears.
+
+    Returns (findings, identities) where identities maps
+    "Name <email>" -> set of short SHAs.
+    """
     findings = []
+    identities = {}
     log = run_git(root, ["log", "--all", "--format=%H%x1f%an%x1f%ae%x1f%cn"
                          "%x1f%ce%x1f%s%x1f%b%x1e"])
     if log:
@@ -463,14 +481,21 @@ def scan_commit_metadata(root, denylist):
             fields = record.strip("\n").split("\x1f")
             if len(fields) < 7:
                 continue
-            sha = fields[0].strip()
-            text = "\n".join(fields[1:])
-            findings.extend(
-                scan_text(text, f"(commit {sha[:7]})", denylist))
+            sha = fields[0].strip()[:7]
+            author_name, author_email, comm_name, comm_email = fields[1:5]
+            message = "\n".join(fields[5:])
+            findings.extend(scan_text(message, f"(commit {sha})", denylist))
+            findings.extend(scan_text(
+                " ".join(fields[1:5]), f"(commit {sha} identity)",
+                denylist, use_regex=False))
+            for name, email in ((author_name, author_email),
+                                (comm_name, comm_email)):
+                if email:
+                    identities.setdefault(f"{name} <{email}>", set()).add(sha)
     refs = run_git(root, ["for-each-ref", "--format=%(refname)"])
     if refs:
         findings.extend(scan_text(refs, "(ref names)", denylist))
-    return tuple(findings)
+    return tuple(findings), identities
 
 
 def scan_history(root, denylist, limit):
@@ -521,10 +546,11 @@ def scan_history(root, denylist, limit):
     path_text = "\n".join(sorted({path for _sha, path in candidates}))
     findings.extend(
         scan_text(path_text, "(history paths)", denylist, use_regex=False))
-    findings.extend(scan_commit_metadata(root, denylist))
+    meta_findings, identities = scan_commit_metadata(root, denylist)
+    findings.extend(meta_findings)
 
     stats = {"blobs": len(shas), "skipped_large": oversized,
-             "paths": len(candidates)}
+             "paths": len(candidates), "identities": identities}
     return tuple(findings), tuple(problems), stats
 
 
@@ -733,6 +759,15 @@ def main(argv=None):
             root, denylist, opts.history_limit)
         print(f"INFO    history: {stats['blobs']} blob(s) not in HEAD scanned, "
               f"{stats['paths']} reachable object path(s) checked")
+        identities = stats.get("identities") or {}
+        if identities:
+            print(f"INFO    commit identities ({len(identities)}) - confirm "
+                  f"every one is meant to be public:")
+            for ident in sorted(identities,
+                                key=lambda i: (-len(identities[i]), i)):
+                shas = sorted(identities[ident])
+                shown = ", ".join(shas[:4]) + ("..." if len(shas) > 4 else "")
+                print(f"          {ident}  x{len(shas)}  [{shown}]")
 
     structural_set = shipping if shipping is not None else rel_paths
     problems = check_structure(
