@@ -1,10 +1,57 @@
 #!/usr/bin/env python3
-"""leak-scan.py - privacy gate for publishing a sanitized copy of a private vault.
+"""leak-scan.py - PII/identity gate for publishing a sanitized copy of a vault.
 
 Run this before every public push of a vault built from this template. It scans
 a tree - worktree *and* git history - for personal data and machine-local
 artifacts, and exits non-zero unless the tree is clean AND the gate is
 configured.
+
+THIS SCRIPT IS HALF OF THE GATE. IT DOES NOT SCAN FOR SECRETS.
+--------------------------------------------------------------
+Credential detection is gitleaks' job, not this script's. gitleaks ships ~170
+maintained vendor rules with entropy analysis; this file used to hand-roll nine
+credential regexes for the same job and lost. Four were deleted outright and
+five kept only where gitleaks was *measured* to miss, rather than maintaining a
+private regex list badly. Run BOTH tools before publishing - neither alone is
+sufficient, and they overlap almost nowhere. From inside the tree being
+published, in this order (see RELEASING.md section 1):
+
+    gitleaks git . --config .gitleaks.toml --redact=80    # secrets, full history
+    python3 .claude/scripts/leak-scan.py . --expect-single-commit   # PII + structure
+
+Use `git` mode, not `dir` mode. `dir` reads the worktree and does NOT respect
+.gitignore, so it would scan `denylist.txt` - the one file whose entire content
+is real names - and print matches into your terminal or CI log. `git` mode also
+walks all refs, catching a secret that was committed and later removed, which
+`dir` cannot see. Run it from inside the target: given a path argument gitleaks
+reports absolute paths, and any `path` filter that happens to be a substring of
+your working directory then matches every file, so a rule can look like it
+catches everything while catching nothing.
+
+If you run only this script you are NOT covered for secrets. If you run only
+gitleaks you are NOT covered for personal data, commit metadata, or publication
+structure - measured 2026-07-30, gitleaks reported nothing at all on fixtures
+containing an absolute `/Users/<you>/` path, a real email address, a Google Docs
+URL with a document id, or a Google Calendar URL carrying an owner address, in
+either `git` or `dir` mode: it has no rules for any of them. It also never
+looks at commit subjects, bodies, ref names, annotated tag messages or committer
+identity, because it scans diff *content* and file paths only. Every one of
+those is a leak that is public forever once pushed, and every one of them is
+checked here.
+
+Five credential rules are deliberately RETAINED below despite the split, each
+one a gitleaks gap measured on real fixtures: api-token, slack-token,
+secret-assignment, private-key, long-hex. They are labelled at the point of
+definition with what gitleaks misses and when it was measured. Do not delete
+them because "gitleaks handles secrets" - it handles those five badly.
+
+This list is IDENTICAL, by rule and by order, to the private vault copy this
+template is published from, and `test_leak_scan.py` asserts that the two kind
+lists match. The two copies once diverged on exactly the two rules where the
+measurements were sloppiest, each file carrying a comment asserting the opposite
+of the other, with no way for a reader of either to tell which was right. If you
+intentionally diverge them, put the dated reason in both files and update that
+test - do not just let it drift.
 
 Why the mechanism ships when the denylist cannot
 ------------------------------------------------
@@ -28,15 +75,19 @@ What it checks
                     matched case-INSENSITIVELY as substrings - distinctive
                     enough that a substring hit is almost always real.
 2. Structural and regex checks - always on, no personal data required.
-   Absolute home paths, email addresses, long hex blobs, API-key-shaped tokens,
-   private-key headers, document/calendar URLs carrying an id, machine-local
-   artifacts, stray binaries under `assets/`, and a per-directory ceiling on
-   content files.
+   Absolute home paths, email addresses, document/calendar URLs carrying an id,
+   machine-local artifacts, stray binaries under `assets/`, and a per-directory
+   ceiling on content files. Plus the five retained credential rules noted
+   above, kept only where gitleaks was measured to miss.
 3. Git history, not just the worktree. A name committed and later deleted is
    still readable in the commit that introduced it, and public forever once
    pushed. Blobs reachable from any ref but absent from HEAD are scanned
-   separately, together with commit author names, emails, subjects, bodies and
-   ref names. Outside a git repo the history pass is skipped with a warning.
+   separately, together with commit author names, emails, subjects, bodies, ref
+   names, and ANNOTATED TAG MESSAGES - `git tag -a v1 -m "reviewed by <real
+   name>"` lives in a tag object, which `git log` never prints and the blob pass
+   discards, so it was invisible here until 2026-07-30. Outside a git repo the
+   history pass is skipped with a warning. This is the part gitleaks structurally
+   cannot do - see the header note.
 
 Scope
 -----
@@ -54,6 +105,9 @@ Usage
   python3 .claude/scripts/leak-scan.py ../public-repo      # assembled tree
   python3 .claude/scripts/leak-scan.py ../public-repo --expect-single-commit
   python3 .claude/scripts/leak-scan.py --all-files --no-history
+
+  # ...and always alongside the secrets half of the gate, run from inside:
+  cd ../public-repo && gitleaks git . --config .gitleaks.toml --redact=80
 
 Exit codes
 ----------
@@ -135,25 +189,111 @@ ACTION_PIN_RE = re.compile(
 PLACEHOLDER_RE = re.compile(
     r"(?i)your[_-]?|example|placeholder|redacted|changeme|xxxx|dummy|fake")
 
+# A published release checksum pinned in CI - `GITLEAKS_SHA256: <64 hex>` in a
+# workflow, or a `sha256sum` / `shasum -a 256` line. Captured so that one value
+# can be exempted from long-hex on the same line. A vendor's published digest is
+# the opposite of a secret: it is what proves a downloaded binary was not
+# tampered with, and a gate that red-lines it pressures the author into deleting
+# the verification step instead. Same narrowness as ACTION_PIN_RE - only the
+# captured value is exempt, so an unrelated hex blob on a line that merely
+# mentions sha256 is still reported. No `\b` before `sha`: the CI env var is
+# `GITLEAKS_SHA256` and `_` is a word character, so `\b` would never match.
+CHECKSUM_PIN_RE = re.compile(
+    r"(?i)(?<![0-9A-Za-z])sha(?:(?:256|384|512)(?:sum)?|sum)"
+    r"[^0-9A-Za-z]{0,12}([0-9a-fA-F]{32,128})\b")
+
+# Rules deleted 2026-07-30 because gitleaks covers them, verified on generated
+# fixtures using each vendor's real key format, in bare prose as well as
+# `KEY=value` shape, in both `gitleaks dir` and `gitleaks git` mode:
+#   aws-key         300/300 caught (rule aws-access-token)
+#   github-token    all 5 prefixes ghp_/gho_/ghu_/ghs_/ghr_, 60/60 each
+#   google-api-key  100/100 caught (rule gcp-api-key)
+#   jwt             100/100 caught (rule jwt)
+#
+# slack-token was in that list for a few hours on 2026-07-30 and has been
+# RESTORED below. The claim it was deleted on - "all 5 prefixes xoxa/xoxb/xoxp/
+# xoxr/xoxs, 60/60 each" - does not reproduce, and it was wrong in a way worth
+# naming: the fixture generator emitted every token in Slack's canonical shape,
+# so it only ever asked whether gitleaks handles canonical tokens. It does. The
+# shapes a human actually pastes into a note were never generated. Re-measured
+# per shape, one fixture repo each, `gitleaks git .` with the committed config:
+#   xoxs 4-segment hex32  CAUGHT (slack-legacy-token)
+#   xoxs 5-segment hex64  CAUGHT (slack-legacy-token)
+#   xoxs 3-segment alnum  MISSED
+#   xoxs 2-segment        MISSED
+#   xoxp 3-segment alnum  MISSED
+#   xoxp 2-segment        MISSED
+#   xoxe refresh token    MISSED by both tools - a real, open gap
+#
+# The AWS methodology note is still worth keeping, because it nearly produced the
+# opposite wrong answer: a first pass "measured" gitleaks missing 82% of AWS keys,
+# an artifact of generating fixtures in the wrong alphabet (real AWS key ids are
+# base32, A-Z2-7). Both errors have the same root cause. Generating a credential
+# the way the vendor issues it tells you whether the CANONICAL form is covered;
+# generating it the way a person fat-fingers it into prose tells you whether YOU
+# are covered. A deletion decision needs the second measurement, not the first.
+# Known accepted cost of the aws-key deletion: gitleaks' rule requires base32, so
+# an AKIA id containing 0/1/8/9 is not reported, and it deliberately allowlists
+# AKIAIOSFODNN7EXAMPLE. Neither is an issuable key. See RELEASING.md section 1.
 BUILTIN_CHECKS = (
+    # --- PII / identity: this script's actual job. gitleaks has no equivalent
+    # rules for any of these - measured 2026-07-30, it reported zero findings on
+    # fixtures containing each one.
     ("home-path", re.compile(r"/(?:Users|home)/([A-Za-z0-9._-]{2,})")),
     ("email", re.compile(
         r"\b([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.([A-Za-z]{2,24}))\b")),
-    ("aws-key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
-    ("api-token", re.compile(r"\b(?:sk|pk)-(?:ant-)?[A-Za-z0-9_-]{20,}")),
-    ("github-token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b")),
-    ("slack-token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
-    ("google-api-key", re.compile(r"\bAIza[A-Za-z0-9_-]{35}\b")),
-    ("jwt", re.compile(
-        r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+")),
-    ("private-key", re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----")),
-    ("secret-assignment", re.compile(
-        r"(?i)(?:api[_-]?key|secret|token|password)\s*[:=]\s*"
-        r"['\"]?([A-Za-z0-9_\-]{16,})")),
     ("doc-url", re.compile(
         r"(?:docs|drive)\.google\.com/[A-Za-z0-9/_-]*?/d/([A-Za-z0-9_-]{20,})")),
     ("calendar-url", re.compile(
         r"calendar\.google\.com/[^\s)\"']*(?:cid|src)=[A-Za-z0-9%._@-]{16,}")),
+
+    # --- Credential rules RETAINED as measured gitleaks gaps (2026-07-30).
+    # Each line below states what gitleaks misses. Keep them until a re-test
+    # shows gitleaks closed the gap; deleting on faith silently widens the hole.
+
+    # gitleaks catches vendor-signature keys (sk-...T3BlbkFJ..., sk-ant-api03-)
+    # and anything in `key=value` shape via its entropy-gated generic-api-key.
+    # It caught 0/100 of a bare non-vendor `sk-`/`pk-` token sitting in ordinary
+    # prose ("the vendor gave us sk-<40>"), which is exactly how a key gets
+    # pasted into a wiki note. Broad by design, hence the vendor-agnostic shape.
+    ("api-token", re.compile(r"\b(?:sk|pk)-(?:ant-)?[A-Za-z0-9_-]{20,}")),
+
+    # gitleaks' slack rules cover xoxb, xoxa, xoxr and canonical 4-segment xoxp,
+    # plus xoxs in its 4- and 5-segment hex forms. They MISS the 3-segment and
+    # 2-segment xoxs and xoxp shapes. `xoxe-` (refresh) is an open gap in BOTH
+    # tools - gitleaks has no rule, and the `[abprs]` class below excludes it, so
+    # it is reported only when long-hex happens to fire on its tail. See the
+    # per-shape table above. Deliberately shape-broad rather than format-exact,
+    # because the sloppy shapes are the ones that end up in a note.
+    ("slack-token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
+
+    # gitleaks' generic-api-key is entropy-gated, so it degrades exactly where a
+    # vault is most at risk: human-chosen secrets. Measured catch rate 99/100 on
+    # random high-entropy values, 95/100 with a `token` keyword, but only 31/100
+    # on wordy low-entropy secrets - a `password = "<a memorable passphrase>"`
+    # that a person actually typed into a note. This rule has no entropy floor.
+    # (Both examples above are deliberately written so they do not match this
+    # rule: the script is NOT regex-exempt from itself, so a literal example
+    # here would make the gate fail on its own documentation forever.)
+    ("secret-assignment", re.compile(
+        r"(?i)(?:api[_-]?key|secret|token|password)\s*[:=]\s*"
+        r"['\"]?([A-Za-z0-9_\-]{16,})")),
+
+    # gitleaks' private-key rule needs actual base64 key material after the
+    # header AND the closing END marker: 100/100 on a full key, 0/100 on a bare
+    # BEGIN-RSA-PRIVATE-KEY line with the body truncated or not yet pasted, and
+    # still missed with real material present but no END marker at every body
+    # length tested. A stray header is evidence a key passed through this file,
+    # so it stays reportable. (Written without the literal delimiters: this
+    # script is NOT regex-exempt from itself, so a real example here would fail
+    # the gate on its own documentation forever.)
+    ("private-key", re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----")),
+
+    # gitleaks has no long-hex rule at all: 0/100 on a bare 40-char hex blob in
+    # prose (it only caught the `session_token=<64 hex>` form, via
+    # generic-api-key). Opaque hex is how session tokens, digests and internal
+    # record ids leak. It is the noisiest rule here, which is why it carries the
+    # three exemptions in is_exempt() - keep those if you keep this.
     ("long-hex", re.compile(r"\b[0-9a-fA-F]{32,}\b")),
 )
 
@@ -177,10 +317,11 @@ FILE_EXTENSIONS = frozenset({
     "sh", "js", "ts", "json", "yml", "yaml", "html", "css", "toml", "lock",
 })
 
-# Values worth masking in output: a CI log should not reprint the secret.
+# Values worth masking in output: a CI log should not reprint the secret. Only
+# the retained credential kinds remain here - the deleted ones are gitleaks'
+# problem, and gitleaks does its own redaction (`--redact`).
 SECRET_KINDS = frozenset({
-    "aws-key", "api-token", "github-token", "slack-token", "google-api-key",
-    "jwt", "private-key", "secret-assignment",
+    "api-token", "slack-token", "secret-assignment", "private-key",
 })
 
 Denylist = namedtuple("Denylist", "words substrings")
@@ -246,7 +387,10 @@ def word_pattern(term):
 
 def builtin_hits(line):
     """Yield (kind, value) for built-in regex checks on one line."""
-    pinned = frozenset(m.group(1).lower() for m in ACTION_PIN_RE.finditer(line))
+    pinned = frozenset(
+        m.group(1).lower()
+        for pattern in (ACTION_PIN_RE, CHECKSUM_PIN_RE)
+        for m in pattern.finditer(line))
     for kind, pattern in BUILTIN_CHECKS:
         for match in pattern.finditer(line):
             if is_exempt(kind, match, pinned):
@@ -265,7 +409,7 @@ def is_exempt(kind, match, pinned):
         low = value.lower()
         # Git's all-zero null SHA - what a pre-push hook passes to mean "no
         # such ref". 40 hex characters, and not a secret. Plus SHA-pinned
-        # GitHub Actions appearing on this same line.
+        # GitHub Actions and published release checksums on this same line.
         return set(low) == {"0"} or low in pinned
     if kind == "home-path":
         return match.group(1).lower() in EXEMPT_HOME_USERS
@@ -492,9 +636,25 @@ def scan_commit_metadata(root, denylist):
                                 (comm_name, comm_email)):
                 if email:
                     identities.setdefault(f"{name} <{email}>", set()).add(sha)
-    refs = run_git(root, ["for-each-ref", "--format=%(refname)"])
+    # Ref names AND annotated tag messages, in one pass. A tag message is
+    # commit-metadata-class leakage that nothing else here can reach: `git log`
+    # never prints tag objects, and the blob pass drops every non-blob. So
+    # `git tag -a v1.0 -m "reviewed by <real name>"` was invisible to this gate
+    # until 2026-07-30 - measured on a fixture whose tag message named a
+    # denylisted employer and which scanned clean, while the same string in a
+    # commit subject was reported. Ported from the private vault copy, which had
+    # already closed it.
+    #
+    # `%(if)%(taggername)` is true only for annotated tags, so a lightweight tag
+    # contributes its ref name and nothing else - its commit message is already
+    # covered by the commit pass, and printing it here would duplicate every
+    # finding.
+    refs = run_git(root, [
+        "for-each-ref",
+        "--format=%(refname)%0a%(if)%(taggername)%(then)%(contents)%(end)"])
     if refs:
-        findings.extend(scan_text(refs, "(ref names)", denylist))
+        findings.extend(
+            scan_text(refs, "(ref names and tag messages)", denylist))
     return tuple(findings), identities
 
 
@@ -538,8 +698,19 @@ def scan_history(root, denylist, limit):
 
     findings = []
     for sha, text in read_blobs(root, shas):
-        where = f"{blob_paths.get(sha, '?')}@{sha[:7]}"
-        findings.extend(scan_text(text, where, denylist))
+        rel = blob_paths.get(sha, "?")
+        where = f"{rel}@{sha[:7]}"
+        # Apply the SAME regex exemption the worktree pass uses. Exempting only
+        # there was an asymmetry: denylist.txt and denylist.example.txt hold
+        # deliberate fake placeholders (an invented user home path, an invented
+        # person name), so as soon as either file had a second version the gate
+        # reported its own documentation as a home-path leak. Denylist terms are
+        # still checked here - only the built-in regex battery is skipped.
+        # NB: do not write a literal placeholder home path into this comment.
+        # This file is not itself regex-exempt, by design, so the example would
+        # be reported as a finding in leak-scan.py.
+        findings.extend(
+            scan_text(text, where, denylist, use_regex=rel not in REGEX_EXEMPT))
 
     # Path names leak too: a deleted `raw/<employer>-offsite/` folder is a leak
     # even if every file inside it was scrubbed.

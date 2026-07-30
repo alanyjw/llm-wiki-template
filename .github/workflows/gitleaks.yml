@@ -1,0 +1,113 @@
+name: gitleaks
+
+# Secret scanning over the FULL history, on every push and PR.
+#
+# Deliberately has NO `paths:` filter, unlike wiki-lint.yml. A lint gate is
+# scoped to what it lints; a secret can land in any file in the tree — a skill
+# doc, a setup script, a sample note, a workflow — so scoping this one would
+# create exactly the blind spot it exists to close. Cheap enough not to care:
+# 8 commits / ~578 KB scanned in ~85 ms locally.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+# Least privilege: this workflow only reads the repo. No writes, no packages,
+# no id-token. Declared at the top level so every job inherits it.
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: Scan history for secrets
+    runs-on: ubuntu-latest
+    steps:
+      # Third-party actions are pinned to a full commit SHA, not a tag — tags
+      # are mutable and a compromised upstream can repoint v5 at new code.
+      #
+      # fetch-depth: 0 is load-bearing, not an optimisation to remove. A secret
+      # scrubbed in the tip commit is still fully readable in the commit that
+      # introduced it, and that older commit publishes with the branch. A
+      # shallow clone would let the gate pass on a tree that still leaks.
+      - name: Checkout (full history)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+
+      # Guard the guard. `fetch-depth: 0` above is the only thing making this job
+      # meaningful, and if it ever regresses — an edit, a merge, a reusable
+      # workflow — the scan still exits 0 and this job still goes green while
+      # checking a single commit. A gate that passes loudly while covering almost
+      # nothing is the worst failure mode a privacy gate has, so assert the clone
+      # is complete before trusting a pass. The commit count is printed for the
+      # same reason: a human reading the log can see whether it looks right.
+      - name: Assert the clone is not shallow
+        run: |
+          if [ "$(git rev-parse --is-shallow-repository)" != "false" ]; then
+            echo "::error title=gitleaks::Shallow clone detected. This job must \
+          scan full history — restore 'fetch-depth: 0' on the checkout step."
+            exit 1
+          fi
+          echo "Commits available to scan: $(git rev-list --count --all)"
+
+      # Installed from the pinned release tarball rather than via
+      # gitleaks/gitleaks-action, for two reasons:
+      #   1. That action requires a GITLEAKS_LICENSE secret for repos owned by
+      #      an organisation. A template that red-lines on first push for
+      #      org-owned forks is a template nobody keeps.
+      #   2. The tarball can be checksum-verified here, in the open, which is
+      #      the same supply-chain property SHA-pinning buys for actions.
+      # Bumping: change GITLEAKS_VERSION and GITLEAKS_SHA256 together, taking
+      # the hash from gitleaks_<version>_checksums.txt in the same release. A
+      # stale hash fails closed (sha256sum -c exits non-zero), which is correct.
+      - name: Install gitleaks (pinned + checksum-verified)
+        env:
+          GITLEAKS_VERSION: '8.30.1'
+          GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
+        run: |
+          set -euo pipefail
+          TARBALL="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl --fail --silent --show-error --location \
+            -o "$TARBALL" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${TARBALL}"
+          echo "${GITLEAKS_SHA256}  ${TARBALL}" | sha256sum -c -
+          tar -xzf "$TARBALL" gitleaks
+          install -m 0755 gitleaks /usr/local/bin/gitleaks
+          rm -f "$TARBALL" gitleaks
+          gitleaks version
+
+      # `git` mode, not `dir` mode. The difference matters twice over:
+      #
+      #   - `git` walks the commit graph (default log-opts cover all refs, not
+      #     just HEAD — verified: this repo has 7 commits on main and 8 across
+      #     refs, and gitleaks reports 8 scanned). That is the whole point of
+      #     fetch-depth: 0 above. `dir` reads only the checked-out worktree and
+      #     would never see a secret that was added and later removed.
+      #   - `dir` reads files off disk and does NOT respect .gitignore
+      #     (measured 2026-07-30, gitleaks 8.30.1: a planted key inside a
+      #     gitignored directory was reported). On this vault that means it
+      #     would flag machine-local artifacts nobody is publishing — the qmd
+      #     index under .qmd/, .claude/settings.local.json, and the gitignored
+      #     privacy denylist itself. A gate that fires on files that cannot
+      #     leak is a gate people learn to skip.
+      #
+      # --redact=80 keeps 20% of a matched value in the log: enough to locate
+      # the string in your tree, not enough to reuse it. CI logs are readable by
+      # anyone with repo read access and are retained after the run.
+      #
+      # Rules and allowlist policy live in .gitleaks.toml. This gate covers
+      # SECRETS only — the identity/PII half is leak-scan.py, which cannot run
+      # in CI because its denylist is gitignored. See RELEASING.md section 1.
+      - name: gitleaks — full history (gates the build)
+        id: gitleaks
+        run: |
+          gitleaks git . \
+            --config .gitleaks.toml \
+            --redact=80 \
+            --no-banner \
+            --exit-code 1
+
+      - name: Done
+        if: success()
+        run: echo "::notice title=gitleaks::No secrets found in full history."

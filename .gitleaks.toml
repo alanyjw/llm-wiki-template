@@ -1,0 +1,86 @@
+# gitleaks configuration — the SECRETS half of the release privacy gate.
+#
+# WHY THIS FILE IS ALMOST EMPTY
+# -----------------------------
+# `useDefault = true` inherits gitleaks' full upstream rule set (~170 rules with
+# entropy analysis, maintained by people who watch provider token formats change).
+# That is the entire point of adopting it: credential detection is a moving
+# target, and a hand-rolled regex list in this repo goes stale silently. Do not
+# copy provider rules in here. If a token format is missing, fix it upstream or
+# bump the pinned version in .github/workflows/gitleaks.yml.
+#
+# WHY THE NAMES ARE NOT IN HERE
+# -----------------------------
+# This gate finds *secrets*. The other half of the release gate finds *identity
+# and PII* — real people, employers, handles, absolute home paths — and it
+# deliberately lives somewhere else: `.claude/scripts/leak-scan.py`, which loads
+# its terms at runtime from `.claude/scripts/denylist.txt`. That denylist is
+# gitignored, because a committed list of real names IS the disclosure it exists
+# to prevent: anyone reading the repo would get a tidy, deduplicated roster of
+# every person and organisation you were trying to keep out of it.
+#
+# So: NEVER put a real name, employer, handle, email address or home path in this
+# file. It is committed and public. Ambiguity is not required here — if you are
+# reaching for a personal string, you are in the wrong file.
+#
+# gitleaks and leak-scan.py are complementary, not redundant. Measured with
+# gitleaks 8.30.1 on 2026-07-30 against a fixture repo carrying an organisation
+# name in five different places, gitleaks reported 0 findings: it reads diff
+# content and file paths, and never reads commit subjects, commit bodies, ref
+# names, annotated tag messages, or author/committer identity. leak-scan.py reads
+# all five. Both must pass — see RELEASING.md section 1.
+#
+# ALLOWLIST POLICY
+# ----------------
+# Empty, on purpose. Measured 2026-07-30 on this repo:
+#
+#     gitleaks git . --config .gitleaks.toml   ->  8 commits scanned, 0 findings
+#
+# There is nothing to allowlist, so nothing is allowlisted. Every future entry
+# must cite the finding that forced it — rule id, file, and the date measured —
+# in a comment on the entry itself. An allowlist added "just in case" is a hole
+# nobody remembers opening, and this gate runs once, irreversibly, at the moment
+# the tree becomes public.
+#
+# Upstream blind spots are recorded here so nobody "fixes" them by pasting a local
+# rule back in. All measured 2026-07-30 with gitleaks 8.30.1; all five still
+# covered by rules deliberately retained in leak-scan.py, with the catch rates in
+# comments beside them there:
+#
+#   - a BEGIN-RSA-PRIVATE-KEY header with no key material          ->  0/100
+#   - a low-entropy human passphrase in password-assignment shape  ->  31/100
+#   - a bare non-vendor `sk-`/`pk-` token sitting in prose         ->  0/100
+#   - 3-segment `xoxp-` and 3-segment `xoxs-` Slack tokens         ->  MISSED
+#     (the canonical 4-segment xoxp and hex xoxs forms ARE caught)
+#   - a bare 40-char hex blob in prose (no long-hex rule upstream) ->  0/100
+#
+# Note the shapes above are written WITHOUT their literal delimiters and without a
+# real assignment. leak-scan.py is not exempt from itself and this file is inside
+# its shipping set, so a verbatim example here would fail the release gate on its
+# own documentation, permanently.
+#
+# One more, on gitleaks' side and arguably correct: the canonical AWS
+# documentation example access key (`AKIA…EXAMPLE`) is allowlisted upstream and is
+# not reported. Flagging every tutorial would train people to ignore the gate.
+#
+# The trade is worth it in the other direction too: in the same measurement
+# gitleaks caught a Stripe secret key (`stripe-access-token`) that leak-scan.py
+# has no rule for and never will, and it does not flag SHA-pinned GitHub Actions,
+# which a naive long-hex regex cannot avoid doing.
+
+[extend]
+useDefault = true
+
+# --- allowlist template — copy, fill in the evidence, uncomment -------------
+#
+# [[allowlists]]
+#   description = '''
+#     <rule-id> fires on <file> because <reason it is not a real secret>.
+#     Measured <YYYY-MM-DD>, gitleaks <version>.
+#   '''
+#   targetRules = ["<rule-id>"]          # never blanket-allow; name the rule
+#   paths = ['''^path/to/file\.md$''']   # anchor it; a loose regex is a hole
+#
+# Prefer a `gitleaks:allow` comment on the offending line over an entry here
+# when the false positive is one line in one file — it keeps the justification
+# next to the string instead of in a config nobody rereads.

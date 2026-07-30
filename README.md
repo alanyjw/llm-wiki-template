@@ -50,10 +50,9 @@ The short version:
      globally: `npm install -g @tobilu/qmd`.
    - Python 3 — for the lint and index scripts (stdlib only, no install).
 
-   Nothing else. The vendor lint CLI (`markdownlint-obsidian-cli`) is never
-   installed — `npx markdownlint-obsidian-cli@1.1.0 …` fetches the pinned version
-   each run. CI uses `bunx` for the same command; if you happen to have
-   [Bun](https://bun.sh), it works locally too, but it is not a prerequisite.
+   Nothing else — the vendor lint CLI is never installed; `npx
+   markdownlint-obsidian-cli@1.1.0 …` fetches the pinned version each run. (CI
+   runs the same command through `bunx`; Bun is not a prerequisite locally.)
 3. **Run `./setup.sh`** — registers your notes folders with `qmd` and builds the
    search index. The `qmd` MCP server is pre-wired in `.mcp.json`, so Claude
    Code connects to it automatically when you open the folder.
@@ -71,8 +70,9 @@ The short version:
 - **`.mcp.json`** — registers the `qmd` MCP server so Claude Code wires up
   retrieval automatically on open.
 - **`qmd`** — indexes the markdown corpus for keyword + semantic search.
-- **`.nvmrc`** — Node LTS line (`22`) for `qmd` and for the `npx`-fetched lint CLI.
-  `nvm use` if you use nvm; not required if you installed Node LTS from nodejs.org.
+- **`gitleaks`** — secret scanning over the full git history (`.gitleaks.toml`).
+  Credentials only; it knows nothing about names — that half is `leak-scan.py`.
+- **`.nvmrc`** — Node LTS line (`22`) for `qmd` and the `npx`-fetched lint CLI.
 
 Every script in `.claude/scripts/` is Python 3 or POSIX `sh`, stdlib only:
 
@@ -84,17 +84,21 @@ Every script in `.claude/scripts/` is Python 3 or POSIX `sh`, stdlib only:
   changed must bump `date_updated`. Needs git history, so it runs only in CI.
 - **`ingest-coverage.py`** — reports which notes in `raw/` no `wiki/sources/` page
   claims via `raw_sources:`. A work queue, not a gate (`--fail-on-unmapped` opts in).
-- **`leak-scan.py`** — release-time privacy gate: scans a tree's worktree, git
-  history and structure for personal data. See [`RELEASING.md`](./RELEASING.md).
-- **`qmd-refresh-hook.sh`** — re-indexes after a `git pull` or rebase brings in
-  remote notes, so retrieval never answers from a stale index. Git hooks are
-  machine-local, so **nothing installs this for you** — run the one-time snippet
-  in `SETUP.md` once per clone.
+- **`leak-scan.py`** — release-time privacy gate for **identity and PII**: names,
+  home paths, addresses, document ids and publication structure, across the
+  worktree, unreachable history blobs, and the commit metadata a secrets scanner
+  never reads. Credentials are gitleaks' job; both are required — see
+  [`RELEASING.md`](./RELEASING.md).
+- **`qmd-refresh-hook.sh`** — re-indexes after a `git pull` or rebase, so retrieval
+  never answers from a stale index. Git hooks are machine-local, so **nothing
+  installs this for you** — run the one-time snippet in `SETUP.md` per clone.
 - **`bump-markdownlint-obsidian.sh`** — pins/bumps the vendor lint CLI.
 
-Two GitHub Actions workflows:
+Three GitHub Actions workflows:
 
 - **`wiki-lint.yml`** — runs every lint gate on each push and PR touching `wiki/`.
+- **`gitleaks.yml`** — scans the full history for secrets on every push and PR. No
+  path filter, on purpose: a secret can land in any file.
 - **`auto-merge-briefings.yml`** — **opt-in, inert by default.** Squash-merges PRs
   from an automated session that touch nothing but `raw/briefings/`. Enable by
   setting the repository variable `ENABLE_BRIEFING_AUTOMERGE` to `true`; delete
@@ -127,10 +131,10 @@ one encapsulates a multi-step routine that would otherwise drift if hand-run.
 
 ## Publishing a sanitized copy
 
-Publishing a scrubbed copy of a private vault — the way this template was
-produced — is its own discipline: read [`RELEASING.md`](./RELEASING.md) first.
-It covers the runnable privacy gate (`leak-scan.py`), how to write its denylist,
-and why git history and commit authorship leak even after a squash.
+Publishing a scrubbed copy of a private vault — the way this template was produced
+— is its own discipline: read [`RELEASING.md`](./RELEASING.md) first. It covers the
+two-part privacy gate (`gitleaks` for secrets, `leak-scan.py` for identity), how to
+write the denylist, and why git history and commit authorship leak after a squash.
 
 ## License
 
