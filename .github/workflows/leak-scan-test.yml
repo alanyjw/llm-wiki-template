@@ -1,0 +1,159 @@
+name: leak-scan-test
+
+# Runs the unit-test suite for the privacy gate (.claude/scripts/leak-scan.py),
+# the script that must pass before any tree derived from a private vault is
+# published. Stdlib-only — no pip deps; ubuntu-latest ships a usable python3.
+#
+# Why this workflow exists, in three lines:
+#   1. leak-scan.py is a SECURITY gate. Everything downstream of it — every
+#      published tree, every "safe to make this repo public" decision — is only
+#      as good as the gate's detection rules actually working.
+#   2. An untested security gate is a security gate nobody has checked. It goes
+#      on being trusted while its rules rot, because nothing is asserting they
+#      still fire. That is not hypothetical: this scanner's sibling copy was
+#      rewritten once and every test broke silently, unnoticed, because no job
+#      ran them.
+#   3. This scanner exists in two copies — this public template's, and the
+#      private vault's, which IS tested and gated in CI. A tested copy beside an
+#      untested one is precisely how the two drift, and drift in this exact file
+#      (which rules are enabled, which are delegated to gitleaks) is the failure
+#      this whole effort was about. So this copy is tested too, and its suite
+#      pins its own rule set: a rule silently appearing or disappearing here
+#      fails a test rather than quietly diverging from the sibling.
+#
+# The suite builds throwaway git repos (to cover leaks that live only in commit
+# messages, ref names, tags and deleted blobs), so real `git` is required. It is
+# otherwise stdlib-only, hence no setup-python and no pip install step.
+
+# DO NOT MARK THIS JOB A REQUIRED STATUS CHECK while the `paths:` filters below
+# are in place. A workflow skipped by a path filter never reports a conclusion
+# at all, so every PR touching none of these three files would sit pending on a
+# check that is never coming. If it needs to be required, first either drop the
+# `paths:` filters (the suite runs in ~11s, so running it always costs nothing
+# worth measuring) or add a path-filtered companion job that reports success.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.claude/scripts/leak-scan.py'
+      - '.claude/scripts/test_leak_scan.py'
+      - '.github/workflows/leak-scan-test.yml'
+  pull_request:
+    paths:
+      - '.claude/scripts/leak-scan.py'
+      - '.claude/scripts/test_leak_scan.py'
+      - '.github/workflows/leak-scan-test.yml'
+  workflow_dispatch: {}
+
+# Least privilege: this workflow only reads the repo. No writes, no packages,
+# no id-token. Declared at the top level so every job inherits it.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: leak-scan unit tests
+    runs-on: ubuntu-latest
+    steps:
+      # Third-party actions are pinned to a full commit SHA, not a tag — tags
+      # are mutable and a compromised upstream can repoint v5 at new code.
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      # Belt-and-braces for the throwaway repos the suite builds. The suite is
+      # expected to pass explicit `-c user.name` / `-c user.email` /
+      # `-c commit.gpgsign=false` to its own git calls so it never depends on
+      # ambient config — this step exists only so a runner-config difference
+      # can never turn a privacy gate red for a reason that has nothing to do
+      # with privacy. It does not excuse the suite from being self-contained.
+      #
+      # THE ADDRESS BELOW MUST SIT IN `EXEMPT_EMAIL_DOMAINS` (leak-scan.py).
+      # This workflow file ships inside the tree the gate scans, and the gate is
+      # deliberately not exempt from its own documentation — an address on any
+      # other domain makes the template repo fail its own privacy gate on this
+      # very file. The reserved `.invalid` TLD is the tempting wrong answer: it
+      # is unroutable by RFC 2606, but it is NOT in that exempt set, and a first
+      # draft of this step used it and red-lined `leak-scan.py .` with an
+      # `[email]` finding on this exact line. `example.com` and
+      # `users.noreply.github.com` are both already exempt. Do NOT fix a hit
+      # here by widening `EXEMPT_EMAIL_DOMAINS` — that would blunt the gate to
+      # quiet its own CI config. Change the address instead. The suite made the
+      # same choice for its own fixture identity: a local part on example.com.
+      - name: Give git a committer identity (fallback for throwaway repos)
+        run: |
+          set -euo pipefail
+          git config --global user.name 'ci'
+          git config --global user.email 'ci@example.com'
+          git config --global commit.gpgsign false
+          git config --global init.defaultBranch main
+
+      # `set -o pipefail` is load-bearing, not style. Without it the exit status
+      # of the pipeline is `tee`'s (always 0) and a FAILING suite renders as a
+      # green build — the one outcome a gate's own test job must never produce.
+      - name: Run test suite (gates the build)
+        run: |
+          set -o pipefail
+          python3 .claude/scripts/test_leak_scan.py -v 2>&1 | tee /tmp/leak-scan-tests.log
+
+      # Guard the guard, part 1. `unittest` exits 0 on "Ran 0 tests" — so a
+      # suite that failed to collect anything (renamed class, broken import
+      # guard, wrong entrypoint) passes loudly while checking nothing. Assert a
+      # non-zero count and print it, so a human reading the log can also see
+      # whether the number looks right.
+      - name: Assert the suite actually ran tests
+        run: |
+          set -euo pipefail
+          COUNT=$(grep -oE '^Ran [0-9]+ test' /tmp/leak-scan-tests.log | grep -oE '[0-9]+' | tail -1 || true)
+          if [ -z "$COUNT" ] || [ "$COUNT" -eq 0 ]; then
+            echo "::error title=leak-scan-test::The suite reported no tests. A privacy gate whose tests did not run is a privacy gate nobody has checked."
+            exit 1
+          fi
+          echo "Tests run: $COUNT"
+
+      # Guard the guard, part 2 — the skip lesson, carried across from the
+      # sibling repo where the first run of this workflow went red.
+      #
+      # A skipped test IS invisible coverage loss: the build is green and the
+      # rule it covered is unchecked. So skips must be asserted on. But the
+      # sibling's first guard failed EVERY skip, and three of its tests skip for
+      # a legitimate machine-local reason (a repo that only exists on a
+      # developer's disk) — so the guard red-lined honest runs and taught people
+      # to ignore it.
+      #
+      # The distinction is: a skip whose reason is REGISTERED here is one CI
+      # legitimately cannot run, and warns. Any OTHER skip reason is coverage
+      # that quietly shrank, and fails.
+      #
+      # EXPECTED_SKIP_RE is empty on purpose. This template's suite is designed
+      # to be self-contained — its denylist is a constructor argument, not a
+      # global, and it deliberately does NOT carry the sibling's cross-repo
+      # tests (which reference a private path this repo must never know about).
+      # So the correct number of skips on a runner is zero. If a genuinely
+      # machine-local skip is ever added, register its reason substring below
+      # WITH a comment saying why CI cannot run it; do not widen the pattern to
+      # quiet a failure.
+      - name: Assert no test skipped for an unexpected reason
+        run: |
+          set -euo pipefail
+          EXPECTED_SKIP_RE=''
+          SKIPS=$(grep -oE "skipped '[^']*'" /tmp/leak-scan-tests.log || true)
+          if [ -n "$EXPECTED_SKIP_RE" ] && [ -n "$SKIPS" ]; then
+            UNEXPECTED=$(printf '%s\n' "$SKIPS" | grep -Ev "$EXPECTED_SKIP_RE" || true)
+            EXPECTED=$(printf '%s\n' "$SKIPS" | grep -E "$EXPECTED_SKIP_RE" || true)
+          else
+            UNEXPECTED="$SKIPS"
+            EXPECTED=''
+          fi
+          if [ -n "$UNEXPECTED" ]; then
+            echo "::error title=leak-scan-test::Tests skipped for an unregistered reason — coverage shrank silently:"
+            echo "$UNEXPECTED"
+            exit 1
+          fi
+          if [ -n "$EXPECTED" ]; then
+            echo "::warning title=leak-scan-test::Tests skipped for a registered machine-local reason — those rules were NOT checked this run:"
+            echo "$EXPECTED"
+          fi
+
+      - name: Done
+        if: success()
+        run: echo "::notice title=leak-scan-test::All tests passed, none skipped."

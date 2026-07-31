@@ -618,15 +618,25 @@ def scan_commit_metadata(root, denylist):
     """
     findings = []
     identities = {}
-    log = run_git(root, ["log", "--all", "--format=%H%x1f%an%x1f%ae%x1f%cn"
-                         "%x1f%ce%x1f%s%x1f%b%x1e"])
+    # Commit records are NUL-separated (`git log -z`), not separated by a
+    # control byte embedded in the format. A literal \x1e in a commit body split
+    # one commit into two malformed records, and the tail - everything after the
+    # \x1e - was silently dropped unscanned, so a leak placed after it was never
+    # seen. A commit message cannot contain NUL, so -z is the only separator
+    # that is safe by construction.
+    log = run_git(root, ["log", "--all", "-z",
+                         "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%s%x1f%b"])
     if log:
-        for record in log.split("\x1e"):
-            fields = record.strip("\n").split("\x1f")
+        for record in log.split("\0"):
+            if not record.strip():
+                continue
+            fields = record.split("\x1f")
             if len(fields) < 7:
                 continue
             sha = fields[0].strip()[:7]
             author_name, author_email, comm_name, comm_email = fields[1:5]
+            # A body may itself contain \x1f, so join the tail rather than
+            # indexing a fixed position.
             message = "\n".join(fields[5:])
             findings.extend(scan_text(message, f"(commit {sha})", denylist))
             findings.extend(scan_text(

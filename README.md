@@ -89,16 +89,20 @@ Every script in `.claude/scripts/` is Python 3 or POSIX `sh`, stdlib only:
   worktree, unreachable history blobs, and the commit metadata a secrets scanner
   never reads. Credentials are gitleaks' job; both are required — see
   [`RELEASING.md`](./RELEASING.md).
+- **`test_leak_scan.py`** — that gate's own unit suite: every detection rule, plus
+  the rule set itself, pinned so a rule cannot appear or vanish unnoticed. CI gate.
 - **`qmd-refresh-hook.sh`** — re-indexes after a `git pull` or rebase, so retrieval
   never answers from a stale index. Git hooks are machine-local, so **nothing
   installs this for you** — run the one-time snippet in `SETUP.md` per clone.
 - **`bump-markdownlint-obsidian.sh`** — pins/bumps the vendor lint CLI.
 
-Three GitHub Actions workflows:
+Four GitHub Actions workflows:
 
 - **`wiki-lint.yml`** — runs every lint gate on each push and PR touching `wiki/`.
 - **`gitleaks.yml`** — scans the full history for secrets on every push and PR. No
   path filter, on purpose: a secret can land in any file.
+- **`leak-scan-test.yml`** — runs `test_leak_scan.py` whenever the scanner or its
+  tests change. An untested privacy gate is one nobody has checked.
 - **`auto-merge-briefings.yml`** — **opt-in, inert by default.** Squash-merges PRs
   from an automated session that touch nothing but `raw/briefings/`. Enable by
   setting the repository variable `ENABLE_BRIEFING_AUTOMERGE` to `true`; delete
