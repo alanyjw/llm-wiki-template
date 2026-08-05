@@ -75,10 +75,20 @@ Output:
 - Human-readable to stdout (file:line:col CODE message)
 - GitHub Actions annotations to stdout when --gh-annotations is passed
 
+Per-instance config (OPTIONAL):
+This file is meant to be byte-identical across every wiki instance so upstream
+fixes arrive by plain checkout rather than hand-merge. The handful of values
+that genuinely differ per instance therefore live OUTSIDE it, in an optional
+JSON file at `<vault-root>/.claude/scripts/wiki-lint.config.json`. Absent
+config = these built-in defaults, exactly; a fresh clone lints with zero setup.
+Malformed config = exit 2 with a message, never a silent fall back to defaults.
+See `load_config` / `apply_config` for the knobs and their merge-vs-replace
+semantics.
+
 Exit codes:
 - 0 = clean (no errors; warnings allowed)
 - 1 = errors found
-- 2 = script failure (e.g. vault not found)
+- 2 = script failure (e.g. vault not found, or bad wiki-lint.config.json)
 
 Usage:
   python3 .claude/scripts/wiki-lint.py wiki/
@@ -95,6 +105,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -233,6 +244,218 @@ TAG_TAXONOMY: dict[str, set[str]] = {
 }
 _KNOWN_TAGS: set[str] = {t for tags in TAG_TAXONOMY.values() for t in tags}
 _TIME_TAG_RE = re.compile(r"^(q[1-4]-\d{4}|\d{4})$")
+
+# Orphan-report allow-list: pages that are intentional entry points and so have
+# no inbound wikilinks by design. Hoisted out of report_orphans() so it can be
+# replaced per instance (glossary split filenames and root pages are named
+# differently in every wiki). Advisory report only — never gates CI.
+ORPHAN_ALLOWLIST: set[str] = {
+    "wiki/overview.md",
+    "wiki/index.md",
+    "wiki/glossary.md",
+    "wiki/glossary/frameworks.md",
+    "wiki/glossary/vernacular.md",
+    "wiki/log.md",
+    "wiki/backlog.md",
+    "wiki/reflections-log.md",
+    "wiki/notes-import-manifest.md",
+}
+
+
+# ---------- Optional per-instance config ----------
+#
+# wiki-lint.py gates CI in every wiki instance, and it is only takeable by plain
+# checkout if all copies are byte-identical. So the values that genuinely differ
+# per instance are lifted out of this file into an OPTIONAL JSON file at
+# <vault-root>/.claude/scripts/wiki-lint.config.json.
+#
+# Three rules this obeys:
+#   1. Config absent  -> the built-in defaults above, byte-for-byte identical
+#      behaviour. A fresh clone of the template lints with zero setup.
+#   2. Config malformed / unreadable / has an unknown key -> exit 2 with a
+#      clear message. It NEVER silently falls back to defaults: a linter that
+#      quietly stops enforcing is worse than no linter, and a typo'd key that
+#      does nothing is exactly that failure.
+#   3. Merge-vs-replace is decided per knob and justified at the point of use in
+#      apply_config(). Getting that backwards is the bug that silently switches
+#      a rule off, so it is spelled out rather than left to the reader.
+#
+# What deliberately has NO config key, so it cannot be weakened from config:
+#   ALL_CHECKS / --check          (the gate set itself)
+#   RECENT_UPDATES_TYPES          (RU001 scope — emptying it would kill RU001)
+#   RECENT_UPDATES_MAX_ENTRIES    (RU004 threshold)
+#   NO_DIRECT_RAW_FOLDERS         (PROV001 scope)
+#   RECOMMENDED_KEYS_BY_TYPE      (FM006 keys)
+#   SYNTH_FOLDERS                 (which folders the reports walk)
+#   severities                    (no way to demote an error to a warning)
+# and REQUIRED_KEYS_BY_TYPE is union-only (see apply_config), so no config value
+# can shorten a built-in type's required-key list and thereby dodge FM004.
+
+CONFIG_RELPATH = ".claude/scripts/wiki-lint.config.json"
+
+# Top-level keys the config may set. Anything else (except `_`-prefixed comment
+# keys) is a hard error — an unrecognised key is almost always a typo, and a
+# typo that silently does nothing is the exact failure mode this guards.
+_CONFIG_KEYS = frozenset({
+    "extra_page_types",
+    "extra_stopwords",
+    "extra_non_term_bold",
+    "tag_taxonomy",
+    "orphan_allowlist",
+    "expected_h2_by_type",
+})
+
+
+class ConfigError(Exception):
+    """Unreadable / malformed / unsafe config. Always fatal, never swallowed."""
+
+
+def _cfg_str_list(where: str, value: object) -> list[str]:
+    """Validate `value` is a JSON array of non-empty strings."""
+    if not isinstance(value, list):
+        raise ConfigError(
+            f"`{where}` must be an array of strings, got {type(value).__name__}"
+        )
+    out: list[str] = []
+    for i, item in enumerate(value):
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError(
+                f"`{where}[{i}]` must be a non-empty string, got {item!r}"
+            )
+        out.append(item.strip())
+    return out
+
+
+def _cfg_str_list_map(where: str, value: object) -> dict[str, list[str]]:
+    """Validate `value` is a JSON object mapping strings -> arrays of strings."""
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"`{where}` must be an object of string-arrays, got {type(value).__name__}"
+        )
+    out: dict[str, list[str]] = {}
+    for k, v in value.items():
+        if not isinstance(k, str) or not k.strip():
+            raise ConfigError(f"`{where}` has a non-string or empty key: {k!r}")
+        out[k.strip()] = _cfg_str_list(f"{where}.{k}", v)
+    return out
+
+
+def load_config(vault_root: Path) -> dict | None:
+    """Read <vault-root>/.claude/scripts/wiki-lint.config.json, or None if absent.
+
+    Resolved against the VAULT ROOT — the same `--vault-root` the linter already
+    uses for wikilink resolution and raw_sources checks — and never against
+    __file__, because CI invokes this script by path from the repo root and a
+    shared copy could live anywhere on disk.
+
+    Raises ConfigError on anything malformed. Callers must not catch-and-default.
+    """
+    cfg_path = vault_root / CONFIG_RELPATH
+    # `is_file()` is False for a DIRECTORY and for a BROKEN SYMLINK, so gating on
+    # it returned None for both and silently fell back to built-in defaults —
+    # the one behaviour this docstring promises never happens. Test existence
+    # instead and let read_text() raise: IsADirectoryError and FileNotFoundError
+    # are both OSError, so both surface as a loud ConfigError.
+    if not cfg_path.exists() and not cfg_path.is_symlink():
+        return None
+    # Messages carry no path: main() already prefixes CONFIG_RELPATH, and
+    # printing it twice made every failure read as if two files were at fault.
+    try:
+        raw = cfg_path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise ConfigError(f"could not be read: {e}") from e
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ConfigError(f"is not valid JSON: {e}") from e
+    if not isinstance(data, dict):
+        raise ConfigError(
+            f"must contain a JSON object at the top level, "
+            f"got {type(data).__name__}"
+        )
+    unknown = sorted(k for k in data if not k.startswith("_") and k not in _CONFIG_KEYS)
+    if unknown:
+        raise ConfigError(
+            f"has unknown key(s): {', '.join(unknown)}. "
+            f"Known keys: {', '.join(sorted(_CONFIG_KEYS))} "
+            "(keys starting with `_` are treated as comments and ignored)"
+        )
+    return data
+
+
+def apply_config(data: dict) -> None:
+    """Fold a validated config into the module-level defaults.
+
+    Rebinds module globals rather than threading a settings object through every
+    check — deliberately the smallest possible diff against a 1,600-line file
+    that three repos gate CI on. Called once, from main(), before any check or
+    report runs.
+    """
+    global REQUIRED_KEYS_BY_TYPE, _STOPWORDS, _NON_TERM_BOLD
+    global TAG_TAXONOMY, _KNOWN_TAGS, ORPHAN_ALLOWLIST, EXPECTED_H2_BY_TYPE
+
+    # MERGE (union-only). New `type:` values are registered so they stop tripping
+    # FM003 — instances name their special pages differently (one calls its
+    # journal `reflections-log`, the next calls it `field-notes-log`). Merge
+    # rather than replace because the six synthesis schemas are the SHARED
+    # contract, not an instance's business. And the per-type key lists union
+    # rather than overwrite: config can only ever ADD a required key, never drop
+    # one, which makes FM004 non-weakenable from config by construction.
+    if "extra_page_types" in data:
+        extra = _cfg_str_list_map("extra_page_types", data["extra_page_types"])
+        merged = dict(REQUIRED_KEYS_BY_TYPE)
+        for ptype, keys in extra.items():
+            base = merged.get(ptype, [])
+            # Order-preserving union: built-ins first, then config-only additions.
+            merged[ptype] = base + [k for k in keys if k not in base]
+        REQUIRED_KEYS_BY_TYPE = merged
+
+    # MERGE. Noise floors for the advisory duplicate / glossary-coverage reports.
+    # The built-ins ("the", "and", "recent updates") are language- and
+    # schema-level noise that is wrong in no instance; an instance only ever
+    # needs to ADD its own org names and house vocabulary. Replacing would
+    # silently re-admit English stopwords as duplicate-detection signal, which
+    # would quietly wreck the report instead of failing visibly.
+    if "extra_stopwords" in data:
+        _STOPWORDS = _STOPWORDS | {
+            w.lower() for w in _cfg_str_list("extra_stopwords", data["extra_stopwords"])
+        }
+    if "extra_non_term_bold" in data:
+        _NON_TERM_BOLD = _NON_TERM_BOLD | {
+            w.lower()
+            for w in _cfg_str_list("extra_non_term_bold", data["extra_non_term_bold"])
+        }
+
+    # REPLACE. The tag taxonomy is a CLOSED vocabulary — `--report tags` flags
+    # everything outside it — and it is wholly instance-specific (one wiki's
+    # domains are career/family/finance, the next one's are logistics/fleet/safety).
+    # Merging would union in the defaults, so every instance would silently
+    # accept the template's tags as on-taxonomy and the report would stop
+    # catching drift. Replace is the only semantics that keeps it a real gate.
+    # Lowercased on load because report_tags compares against lowercased tags.
+    if "tag_taxonomy" in data:
+        taxonomy = _cfg_str_list_map("tag_taxonomy", data["tag_taxonomy"])
+        TAG_TAXONOMY = {k: {t.lower() for t in v} for k, v in taxonomy.items()}
+        _KNOWN_TAGS = {t for tags in TAG_TAXONOMY.values() for t in tags}
+
+    # REPLACE. The orphan allow-list is a list of THIS instance's entry-point
+    # pages, named by path. Merging would keep template paths that do not exist
+    # here (dead weight) and, worse, permanently whitelist a filename this
+    # instance may genuinely want flagged as an orphan. A whitelist you cannot
+    # shrink is not a whitelist.
+    if "orphan_allowlist" in data:
+        ORPHAN_ALLOWLIST = set(
+            _cfg_str_list("orphan_allowlist", data["orphan_allowlist"])
+        )
+
+    # REPLACE. Canonical H2 sections per page type are a whole body-schema
+    # contract copied from each instance's own CLAUDE.md, not an additive list —
+    # merging two instances' section lists would demand sections from both and
+    # report every page as non-conforming.
+    if "expected_h2_by_type" in data:
+        EXPECTED_H2_BY_TYPE = _cfg_str_list_map(
+            "expected_h2_by_type", data["expected_h2_by_type"]
+        )
 
 
 @dataclass
@@ -1122,18 +1345,9 @@ def report_orphans(vault_root: Path) -> int:
         print(f"ERROR: wiki/ not found under {vault_root}", file=sys.stderr)
         return 0
 
-    # Allow-list (intentional entry points)
-    allow = {
-        "wiki/overview.md",
-        "wiki/index.md",
-        "wiki/glossary.md",
-        "wiki/glossary/frameworks.md",
-        "wiki/glossary/vernacular.md",
-        "wiki/log.md",
-        "wiki/backlog.md",
-        "wiki/reflections-log.md",
-        "wiki/notes-import-manifest.md",
-    }
+    # Allow-list (intentional entry points). Module constant so it is
+    # config-replaceable; copied because log archives are appended to it below.
+    allow = set(ORPHAN_ALLOWLIST)
 
     # Build wiki page set
     pages: list[Path] = []
@@ -1589,6 +1803,16 @@ def main() -> int:
     vault_root = Path(args.vault_root).resolve()
     if not vault_root.exists():
         print(f"ERROR: vault-root not found: {vault_root}", file=sys.stderr)
+        return 2
+
+    # Optional per-instance config, resolved against the vault root (see
+    # load_config). Absent = built-in defaults, silently. Bad = fatal, loudly.
+    try:
+        cfg = load_config(vault_root)
+        if cfg is not None:
+            apply_config(cfg)
+    except ConfigError as e:
+        print(f"ERROR: {CONFIG_RELPATH}: {e}", file=sys.stderr)
         return 2
 
     if args.report:

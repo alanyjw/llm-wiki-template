@@ -1,0 +1,51 @@
+{
+  "_comment": "Per-instance config for .claude/scripts/wiki-lint.py. OPTIONAL: delete this file and the linter runs on its built-in defaults, byte-for-byte identically. It exists so wiki-lint.py itself can stay byte-identical across every wiki instance, which is what lets an instance take upstream fixes with a plain checkout instead of a hand-merge. Resolved relative to --vault-root, not to the script's location. Malformed JSON, a wrong value type, or an unknown top-level key = exit 2 with a message; it never silently falls back to defaults. Keys beginning with an underscore are comments and are ignored.",
+
+  "_comment_merge_semantics": "Each knob is either MERGE (config adds to the built-ins) or REPLACE (config supersedes them). The choice is per knob and is justified in apply_config() in wiki-lint.py. Do not assume one rule for all of them.",
+
+  "_comment_extra_page_types": "MERGE, union-only. Registers additional frontmatter `type:` values so they stop tripping FM003 'unknown type'. Each value is that type's list of REQUIRED frontmatter keys; [] means 'no required keys' and suits special pages. Union-only means two things: the six synthesis schemas (source/entity/topic/insight/plan/project) are always registered and cannot be removed from here, and naming an existing type here can only ADD required keys, never drop one. That is what makes FM004 impossible to weaken from config. Rename these entries to whatever your instance calls its special pages.",
+  "extra_page_types": {
+    "manifest": [],
+    "reflections-log": []
+  },
+
+  "_comment_extra_stopwords": "MERGE. Extra tokens ignored when `--report duplicates` compares pages. Add your org name, product names, and house vocabulary — words that appear on nearly every page and so carry no signal about whether two pages duplicate each other. Merged, not replaced, so the built-in English stopwords stay in force. Case-insensitive.",
+  "extra_stopwords": [],
+
+  "_comment_extra_non_term_bold": "MERGE. Extra bold labels that `--report glossary-coverage` should NOT treat as candidate glossary terms. Add the recurring **Bold Label:** conventions your page templates use. Merged, not replaced, so the built-in labels stay in force. Case-insensitive.",
+  "extra_non_term_bold": [],
+
+  "_comment_tag_taxonomy": "REPLACE. The closed tag vocabulary `--report tags` checks frontmatter tags against; anything outside it is reported as off-taxonomy. Replace rather than merge, because merging would leave every instance silently accepting the template's tags as valid and the report would stop catching drift. Mirror your own CLAUDE.md tag taxonomy here. Time tags (bare years, q<N>-YYYY) are matched by pattern and must not be listed. Values are lowercased on load.",
+  "tag_taxonomy": {
+    "domain": ["work", "career", "personal", "family", "tech", "finance"],
+    "activity": ["meeting", "training", "conference", "project"],
+    "role": ["leadership", "management", "craft"],
+    "type": ["1-on-1", "brainstorm", "retrospective", "goal-setting"]
+  },
+
+  "_comment_orphan_allowlist": "REPLACE. Vault-root-relative paths that `--report orphans` should never flag: intentional entry points that have no inbound wikilinks by design. Replace rather than merge, because these are filenames and every instance names its glossary splits and root pages differently; a whitelist you cannot shrink is not a whitelist. Log archives under wiki/log/*-archive.md are allowed automatically and need no entry.",
+  "orphan_allowlist": [
+    "wiki/overview.md",
+    "wiki/index.md",
+    "wiki/glossary.md",
+    "wiki/glossary/frameworks.md",
+    "wiki/glossary/vernacular.md",
+    "wiki/log.md",
+    "wiki/backlog.md",
+    "wiki/reflections-log.md",
+    "wiki/notes-import-manifest.md"
+  ],
+
+  "_comment_expected_h2_by_type": "REPLACE. Canonical H2 section names per page type, checked by `--report schema`. Replace rather than merge, because a body schema is one whole contract copied from your CLAUDE.md; merging two instances' lists would demand the union of both and mark every page non-conforming.",
+  "expected_h2_by_type": {
+    "project": [
+      "Vision & origin",
+      "Scope",
+      "Stakeholder positions",
+      "Decisions log",
+      "Open questions",
+      "Action items",
+      "Related"
+    ]
+  }
+}
