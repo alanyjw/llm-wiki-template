@@ -124,14 +124,15 @@ need nothing. Take the actionable ones one at a time.
 4. Run the three CI gates locally:
 
    ```
-   npx -y markdownlint-obsidian-cli@1.1.0 "wiki/**/*.md" --vault-root wiki | tee /dev/stderr | grep -q . && echo "LAYER 1 FAILED"
+   npx -y markdownlint-obsidian-cli@1.1.0 "wiki/**/*.md" --vault-root wiki
    python3 .claude/scripts/wiki-lint.py wiki/
    python3 .claude/scripts/regenerate-index.py --check
    ```
 
-   The `grep` on layer 1 is not decoration: the vendor CLI **exits 0 even when
-   it reports violations**, so running it bare gives you a false pass. Layers 2
-   and 3 exit non-zero on their own.
+   On layer 1, **any output means failure** — the vendor CLI exits 0 even while
+   printing violations and has no flag to change that, so reading `$?` gives a
+   false pass. Silence is the pass. CI gates it by parsing
+   `--output-formatter json`. Layers 2 and 3 exit non-zero on their own.
 
 5. Commit the path explicitly — `git commit -- <path>` — so a concurrent job's
    staged work is not swept into your commit.

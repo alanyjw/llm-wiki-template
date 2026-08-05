@@ -56,10 +56,43 @@ jobs:
       # Without --bun, bunx uses the `import` condition -> dist/node.js
       # (published) and lints identically. Do not re-add --bun until the vendor
       # ships src/ in the published tarball.
+      # THE CLI ALWAYS EXITS 0, even while printing violations — verified on
+      # v1.1.0 under both bunx and npx, and there is no --strict/--fail-on flag
+      # to change that. So `run: bunx ...` under `bash -e` gated NOTHING: this
+      # step was named "gates the build" and had never once failed a build.
+      # The gate has to live here. Parse the json formatter and fail on any
+      # entry, rather than testing stdout for emptiness — that way an incidental
+      # line on stdout cannot fail a clean run, and a formatter change that
+      # breaks parsing is a loud error instead of a silent pass.
       - name: Layer 1 — markdownlint-obsidian (gates the build)
         id: layer1
         run: |
-          bunx markdownlint-obsidian-cli@1.1.0 "wiki/**/*.md" --vault-root wiki
+          set -euo pipefail
+          bunx markdownlint-obsidian-cli@1.1.0 "wiki/**/*.md" \
+            --vault-root wiki --output-formatter json > layer1.json
+          python3 - <<'PY'
+          import collections, json, sys
+          try:
+              data = json.load(open("layer1.json"))
+          except (OSError, json.JSONDecodeError) as e:
+              sys.exit(f"::error title=Layer 1::could not parse linter output: {e}")
+          if not isinstance(data, list):
+              sys.exit(f"::error title=Layer 1::unexpected output shape: {type(data).__name__}")
+          rows = [(f.get("filePath", "?"), e) for f in data for e in f.get("errors", [])]
+          if not rows:
+              print(f"Layer 1 clean — {len(data)} file(s) linted.")
+              sys.exit(0)
+          for path, e in rows:
+              print(f"::error file={path},line={e.get('line', 1)},"
+                    f"col={e.get('column', 1)}::{e.get('ruleCode', '?')} "
+                    f"{e.get('message', '')}")
+          tally = collections.Counter(e.get("ruleCode", "?") for _, e in rows)
+          print(f"\nLayer 1 FAILED — {len(rows)} violation(s) across "
+                f"{len({p for p, _ in rows})} file(s):")
+          for code, n in tally.most_common():
+              print(f"  {code}: {n}")
+          sys.exit(1)
+          PY
 
       # Layer 2: vault-specific Python script — GATES the build.
       # The script exits 1 if and only if at least one ERROR-severity finding

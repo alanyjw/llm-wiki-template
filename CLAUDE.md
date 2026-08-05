@@ -195,7 +195,9 @@ Gates run on every PR/push touching `wiki/`. Run them locally before committing.
 npx markdownlint-obsidian-cli@1.1.0 "wiki/**/*.md" --vault-root wiki
 ```
 
-`npx` ships with Node, so this needs no extra install. CI runs the identical version through `bunx` (`.github/workflows/wiki-lint.yml`) and the two produce byte-identical output; use whichever runner you have. If you use `bunx`, do **not** add `--bun`: the transitive `markdown-flavor-detection` dependency ships no `src/`, so `--bun` resolves its `bun` export condition to an unpublished file and the run dies.
+**Any output at all means failure.** The CLI exits `0` even while printing violations, and has no `--strict`/`--fail-on` flag — so `&&`-chaining it or trusting `$?` gives a false pass. CI works around this by parsing `--output-formatter json` and failing on any entry (`.github/workflows/wiki-lint.yml`); locally, read the output. Silence is the pass.
+
+`npx` ships with Node, so this needs no extra install. CI runs the identical version through `bunx` and the two produce byte-identical output; use whichever runner you have. If you use `bunx`, do **not** add `--bun`: the transitive `markdown-flavor-detection` dependency ships no `src/`, so `--bun` resolves its `bun` export condition to an unpublished file and the run dies. Plain `bunx` is fine — verified on bun 1.3.14; the `--bun` flag is the whole problem, not the bun version.
 
 Every file under `wiki/` is linted — there are no per-file carve-outs; `.obsidian-linter.jsonc` only ignores whole non-wiki trees (`raw/`, `assets/`, `templates/`, `prompts/`).
 
