@@ -1,0 +1,285 @@
+name: template-drift
+
+# Weekly check: has this instance's shared toolchain drifted from the upstream
+# template? Nobody has to remember to run it — that is the whole point. The
+# instance inherits this file along with the rest of the toolchain, so a new
+# instance gets the check the moment it takes the template.
+#
+# UPSTREAM SAFETY: this same file runs in the template repo itself, where the
+# comparison is meaningless. `.claude/scripts/template-drift.py` self-detects
+# that case — it compares `remote.origin.url` against the template remote's URL
+# (falling back to the repo slug when no template remote exists) and exits 0
+# with "this IS the upstream". So the job goes green and NO issue is ever
+# opened in the upstream. Verified end-to-end, both branches.
+#
+# There is deliberately no `if: github.repository != ...` guard here. A
+# hardcoded repository name is exactly the kind of thing every instance would
+# have to edit, and this workflow is meant to be inherited unedited.
+on:
+  schedule:
+    # Mondays, 05:23 UTC. Off the top of the hour on purpose: GitHub queues
+    # scheduled jobs and :00 is the busiest slot, so an on-the-hour cron gets
+    # delayed or dropped under load.
+    #
+    # Two GitHub behaviours worth knowing, because both fail silently:
+    #   1. Scheduled workflows are auto-disabled after 60 days of no repo
+    #      activity. A dormant vault stops being checked and says nothing.
+    #   2. Scheduled workflows never run in a fork unless explicitly enabled.
+    # If weeks pass with no run, check Actions -> template-drift before
+    # concluding there is no drift.
+    - cron: '23 5 * * 1'
+  workflow_dispatch: {}
+
+# Least privilege. `issues: write` is the only elevation over wiki-lint.yml's
+# read-only stance, and it exists solely so the job can file/close the one
+# tracking issue. No `contents: write`, no `pull-requests`, no `packages`, no
+# `id-token` — this job never pushes anything and never opens a PR.
+permissions:
+  contents: read
+  issues: write
+
+# Two runs racing (a manual dispatch on top of the weekly cron) could both see
+# "no open issue" and both create one. Serialise instead. `cancel-in-progress`
+# stays false: a half-finished run that already created the issue but has not
+# yet commented is worse than a run that waits.
+concurrency:
+  group: template-drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    name: Check toolchain drift vs upstream template
+    runs-on: ubuntu-latest
+    steps:
+      # Third-party actions are pinned to a full commit SHA, not a tag — tags
+      # are mutable and a compromised upstream can repoint v5 at new code.
+      # This SHA is the same one wiki-lint.yml and gitleaks.yml already pin.
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          # Full history. Cheap on a vault-sized repo, and it leaves the drift
+          # script free to reason about when a watched file last changed here
+          # without paying for a second fetch. A shallow clone would also make
+          # `git log` on a watched path silently useless.
+          fetch-depth: 0
+
+      # The scripts are stdlib-only, so this pins a *version*, not dependencies.
+      # ubuntu-latest already ships a python3; pinning means a runner-image bump
+      # cannot change drift-check behaviour underneath you. (wiki-lint.yml skips
+      # this step because it is allowed to track whatever the image ships; this
+      # job files issues, so a surprise interpreter change is a louder problem.)
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+
+      # Remote setup, in this exact order:
+      #   1. add the remote
+      #   2. disable its push URL
+      # Reversed, there is a window where `git push template` would reach the
+      # public upstream from a private vault. The drift script enforces the end
+      # state — it exits 2 unless the push URL contains the string DISABLED —
+      # but the ordering here is what makes the window not exist in the first
+      # place.
+      #
+      # HTTPS, not SSH: the upstream is a third-party PUBLIC repo and CI has no
+      # deploy key for it. HTTPS needs no credentials to read a public repo.
+      #
+      # The URL is a repository variable, so an instance in another org edits
+      # zero lines of this file:
+      #   Settings -> Secrets and variables -> Actions -> Variables ->
+      #   New variable -> TEMPLATE_REMOTE_URL
+      - name: Add upstream remote (read-only)
+        env:
+          # No default. A guessed default URL 404s for every instance but the
+          # one it was guessed for, and a 404 reads as "upstream unreachable"
+          # rather than "you skipped a setup step". Requiring the variable makes
+          # the missing-setup case say so in one line.
+          TEMPLATE_REMOTE_URL: ${{ vars.TEMPLATE_REMOTE_URL }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TEMPLATE_REMOTE_URL}" ]; then
+            echo "::error title=template-drift::TEMPLATE_REMOTE_URL is not set. \
+          Set it to the upstream template's public HTTPS clone URL under \
+          Settings > Secrets and variables > Actions > Variables. See SYNC.md section 1."
+            exit 1
+          fi
+
+          # Preflight: read-only probe, so a bad URL fails HERE with an
+          # instruction rather than 40 lines down with a bare git error.
+          if ! git ls-remote --exit-code --heads "$TEMPLATE_REMOTE_URL" main >/dev/null 2>&1; then
+            echo "::error title=template-drift::Upstream not reachable: \
+          $TEMPLATE_REMOTE_URL — set the repository variable TEMPLATE_REMOTE_URL \
+          (Settings > Secrets and variables > Actions > Variables) to the public \
+          template's HTTPS clone URL. See SYNC.md section 1."
+            exit 1
+          fi
+
+          # Idempotent: a re-run on a cached checkout must not fail on "remote
+          # already exists".
+          git remote remove template 2>/dev/null || true
+          git remote add template "$TEMPLATE_REMOTE_URL"
+          git remote set-url --push template DISABLED_public_repo
+
+          # Fetch via the remote's default refspec so refs/remotes/template/*
+          # exists for the script to diff against. --no-tags keeps upstream tags
+          # out of the instance's tag namespace.
+          git fetch --no-tags --quiet template
+
+          echo "Remote configured:"
+          git remote -v | sed 's/^/  /'
+
+      # Exit codes are the interface:
+      #   0 = no actionable drift, or this IS the upstream
+      #   1 = drift found
+      #   2 = misconfigured
+      # Captured rather than allowed to fail the step, because 1 is a normal
+      # outcome that must reach the issue steps below.
+      - name: Run drift report
+        id: drift
+        run: |
+          set +e
+          python3 .claude/scripts/template-drift.py > drift-report.txt 2>&1
+          STATUS=$?
+          set -e
+
+          cat drift-report.txt
+          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+
+          # A misconfigured drift check that reports success is the exact
+          # failure mode this whole workflow exists to prevent: it would go
+          # green every week while comparing nothing. Fail loudly.
+          if [ "$STATUS" -eq 2 ]; then
+            echo "::error title=template-drift::MISCONFIGURED (exit 2). The \
+          check did NOT run — this is not a pass. Read the report above; usual \
+          causes are a missing 'template' remote or a push URL that was never \
+          disabled."
+            exit 1
+          fi
+
+          # Anything outside {0,1,2} means the script changed contract or
+          # crashed. Treat unknown as broken, never as clean.
+          if [ "$STATUS" -ne 0 ] && [ "$STATUS" -ne 1 ]; then
+            echo "::error title=template-drift::Unexpected exit ${STATUS} from \
+          template-drift.py. Expected 0 (clean), 1 (drift) or 2 (misconfigured)."
+            exit 1
+          fi
+
+      # ---- Issue bookkeeping -------------------------------------------------
+      # Exactly ONE issue, titled exactly 'template drift', for the lifetime of
+      # the repo. Drift found -> create it, or reopen + comment on the existing
+      # one. Drift cleared -> close it. Never a second issue, and never a wall
+      # of weekly duplicates.
+      #
+      # NOT `--search`. That routes to GitHub's search index, which lags writes
+      # by seconds: a workflow_dispatch run shortly after the cron run that
+      # created the issue sees zero results and opens a SECOND 'template drift'
+      # issue. `concurrency` serialises the jobs but does nothing about index
+      # lag. The plain list endpoint is read-your-writes consistent, so page it
+      # and match the exact title in jq. Listing --state all (not just open) is
+      # what makes "never open a second one" true across a close/reopen cycle.
+      - name: Find the tracking issue
+        id: find
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          # `state` comes back uppercase OPEN/CLOSED from gh's JSON output —
+          # verified against gh 2.96. The close step below compares on that.
+          if ! FOUND=$(gh issue list \
+            --state all \
+            --limit 100 \
+            --json number,title,state \
+            --jq '[.[] | select(.title == "template drift")] | first // empty'); then
+            echo "::error title=template-drift::Could not list issues. The usual \
+          cause is Issues being disabled on this repo (Settings > General > \
+          Features > Issues) — this workflow has nowhere to report drift. See \
+          SYNC.md section 1."
+            exit 1
+          fi
+          set -e
+
+          if [ -z "$FOUND" ]; then
+            echo "number=" >> "$GITHUB_OUTPUT"
+            echo "state=" >> "$GITHUB_OUTPUT"
+            echo "No existing 'template drift' issue."
+          else
+            NUMBER=$(printf '%s' "$FOUND" | python3 -c 'import json,sys; print(json.load(sys.stdin)["number"])')
+            STATE=$(printf '%s' "$FOUND" | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')
+            echo "number=${NUMBER}" >> "$GITHUB_OUTPUT"
+            echo "state=${STATE}" >> "$GITHUB_OUTPUT"
+            echo "Existing issue #${NUMBER} (${STATE})."
+          fi
+
+      - name: Compose issue body
+        if: steps.drift.outputs.status == '1'
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          {
+            echo "The weekly drift check found shared toolchain files that differ"
+            echo "from the upstream template."
+            echo
+            echo "Report from \`python3 .claude/scripts/template-drift.py\`:"
+            echo
+            echo '```'
+            # Truncated well under GitHub's 65,536-char issue-body ceiling, so a
+            # pathological report degrades to a short body instead of a failed
+            # API call.
+            head -c 50000 drift-report.txt
+            echo
+            echo '```'
+            echo
+            echo "To take a change: **SYNC.md section 3**. To fork a file on"
+            echo "purpose: **SYNC.md section 4**."
+            echo
+            echo "Run: ${RUN_URL}"
+          } > issue-body.md
+          wc -c issue-body.md
+
+      - name: Open or update the tracking issue
+        if: steps.drift.outputs.status == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.find.outputs.number }}
+          ISSUE_STATE: ${{ steps.find.outputs.state }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ISSUE_NUMBER" ]; then
+            gh issue create --title 'template drift' --body-file issue-body.md
+          else
+            # Reopen before commenting: a comment on a closed issue is a comment
+            # nobody sees. Reopening also keeps the "exactly one issue" promise
+            # that creating a fresh one would break.
+            if [ "$ISSUE_STATE" = "CLOSED" ]; then
+              gh issue reopen "$ISSUE_NUMBER"
+            fi
+            gh issue comment "$ISSUE_NUMBER" --body-file issue-body.md
+          fi
+
+      - name: Close the tracking issue (drift cleared)
+        if: steps.drift.outputs.status == '0' && steps.find.outputs.state == 'OPEN'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ steps.find.outputs.number }}
+        run: |
+          set -euo pipefail
+          gh issue close "$ISSUE_NUMBER" \
+            --comment "Drift cleared — the shared toolchain matches upstream again. Closed automatically by the weekly template-drift check."
+
+      # Every value reaching a `run:` block arrives through `env:`, never through
+      # `${{ }}` interpolation inside the script — same rule wiki-lint.yml
+      # follows. These particular values are ours (a step output we wrote), but
+      # the habit is what stops the day someone swaps in event data.
+      - name: Done
+        if: success()
+        env:
+          DRIFT_STATUS: ${{ steps.drift.outputs.status }}
+        run: |
+          if [ "$DRIFT_STATUS" = "1" ]; then
+            echo "::notice title=template-drift::Drift found — see the 'template drift' issue."
+          else
+            echo "::notice title=template-drift::No actionable drift."
+          fi
