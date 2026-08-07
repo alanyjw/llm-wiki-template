@@ -1704,7 +1704,7 @@ class TestWorktreeUnreadFiles(ScannerTestCase):
 
     A template ships stubs, so nothing inside it trips a 5MB cap and the bug is
     invisible here. Every vault built from it trips it constantly: book
-    transcripts, note-app exports and whisperx output are routinely multi-MB,
+    transcripts, note-app exports and transcription output are routinely multi-MB,
     which made the gate quietest on exactly the files most likely to carry a
     name.
     """

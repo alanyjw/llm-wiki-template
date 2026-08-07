@@ -100,7 +100,7 @@ An unread file is a silent PASS, which is worse than a noisy FAIL. Two rules:
     text truncated to 4MB reported two leaks. The only variable was file size.
     The template itself ships stubs, so nothing in it trips a 5MB cap; every
     vault built from it trips it constantly, because book transcripts, note-app
-    exports and whisperx output are routinely multi-MB. The gate reported PASS
+    exports and transcription output are routinely multi-MB. The gate reported PASS
     on exactly the files most likely to carry a name. The cap had to go rather
     than be raised: any read budget names a file size above which the gate lies,
     and raising it only moves where the lie starts.
