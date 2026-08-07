@@ -75,6 +75,20 @@ WATCH = [
     ".github/workflows/wiki-lint.yml",
     ".github/workflows/gitleaks.yml",
     ".gitleaks.toml",
+    # The privacy gate. Watched even though instances routinely fork it, because
+    # a fix to the shared SCANNING MECHANISM has to reach them and the denylist
+    # split makes byte-equality impossible for anyone who publishes.
+    #
+    # Upstream loads its terms at runtime from a gitignored denylist.txt; a
+    # private instance may instead commit them inline, which is a permanent,
+    # deliberate divergence rather than a lag. Those instances record it in
+    # .template-sync-ignore and land in IGNORED. That is the point: an
+    # enumerated fork with a reason beats a file nobody remembers is shared.
+    # Before this trio was listed, a worktree-streaming fix travelled between
+    # two copies entirely by hand, and nothing would have reported the miss.
+    ".claude/scripts/leak-scan.py",
+    ".claude/scripts/test_leak_scan.py",
+    ".github/workflows/leak-scan-test.yml",
     ".obsidian-linter.jsonc",
     "templates/capture.md",
     "templates/meeting.md",

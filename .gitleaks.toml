@@ -32,15 +32,37 @@
 #
 # ALLOWLIST POLICY
 # ----------------
-# Empty, on purpose. Measured 2026-07-30 on this repo:
+# Empty, on purpose. Re-measured 2026-08-07 at commit 7922ae4, gitleaks 8.30.1:
 #
-#     gitleaks git . --config .gitleaks.toml   ->  8 commits scanned, 0 findings
+#     gitleaks git . --config .gitleaks.toml   ->  0 findings
+#
+# CITE A COMMIT, NOT A COUNT. The line above used to read "8 commits scanned";
+# by the time anyone reread it the repo was at 14 and the sentence was simply
+# false. A rotten number is worse than no number, because the next reader cannot
+# tell whether the verification is stale or the arithmetic just moved on without
+# it — and the count moves on its own, since gitleaks walks the graph its own way
+# and the local ref set drifts with every push. Record the SHA you measured at.
 #
 # There is nothing to allowlist, so nothing is allowlisted. Every future entry
 # must cite the finding that forced it — rule id, file, and the date measured —
 # in a comment on the entry itself. An allowlist added "just in case" is a hole
 # nobody remembers opening, and this gate runs once, irreversibly, at the moment
 # the tree becomes public.
+#
+# VERIFY WITH THE CHANGE COMMITTED, NOT STAGED. `gitleaks git` reads the commit
+# graph, so an entry validated against a dirty worktree proves nothing about the
+# tree that lands: a newly added fixture is not in the graph yet, which reads
+# exactly like a pass. Commit into a throwaway clone and scan that.
+#
+# AN ENTRY CAN BE LOAD-BEARING AFTER ITS STRING LEAVES THE WORKTREE. Because
+# this gate reads every commit, a fixture that ever existed is in the repo
+# forever. Grepping HEAD is therefore the wrong scope for judging whether an
+# entry is dead — a sibling instance deleted one as a "dead entry covering
+# nothing" on exactly that evidence and the next full-history run failed
+# immediately. To check an entry honestly, scan with an allowlist-free config
+# and read what comes back:
+#
+#     gitleaks git . --config <(printf '[extend]\nuseDefault = true\n')
 #
 # Upstream blind spots are recorded here so nobody "fixes" them by pasting a local
 # rule back in. All measured 2026-07-30 with gitleaks 8.30.1; all five still
@@ -59,9 +81,14 @@
 # its shipping set, so a verbatim example here would fail the release gate on its
 # own documentation, permanently.
 #
-# One more, on gitleaks' side and arguably correct: the canonical AWS
-# documentation example access key (`AKIA…EXAMPLE`) is allowlisted upstream and is
-# not reported. Flagging every tutorial would train people to ignore the gate.
+# Two more on gitleaks' side, both arguably correct, neither a reason to add a
+# rule here. The canonical AWS documentation example access key (`AKIA…EXAMPLE`)
+# is allowlisted upstream and is not reported — flagging every tutorial would
+# train people to ignore the gate. And `aws-access-token` matches `AKIA` followed
+# by sixteen BASE32 characters, i.e. [A-Z2-7], so an id containing 0, 1, 8 or 9
+# is not reported (verified one digit at a time). Real key ids are base32, so
+# that is precision, not a hole. leak-scan.py records the same boundary beside
+# its own rules; neither string above is an issuable key.
 #
 # The trade is worth it in the other direction too: in the same measurement
 # gitleaks caught a Stripe secret key (`stripe-access-token`) that leak-scan.py
@@ -71,6 +98,30 @@
 [extend]
 useDefault = true
 
+# RESHAPE THE FIXTURE BEFORE YOU EXCUSE IT
+# ----------------------------------------
+# A test suite for a secret scanner has to carry credential-SHAPED strings on
+# purpose, and a scanner finding them is correct behaviour rather than a leak.
+# The reflex is to allowlist the test file. Prefer changing the fixture so there
+# is no literal left to match: this repo assembles those shapes from concatenated
+# fragments and templates, which is the only reason the allowlist above is still
+# empty. Grep test_leak_scan.py for a split string literal and you are looking at
+# this rule being applied.
+#
+# It is not tidiness. A private-key fixture that spelled its four
+# BEGIN-RSA-PRIVATE-KEY-style headers as adjacent literals made gitleaks'
+# multi-line private-key rule match ACROSS them, and that stray match then
+# SWALLOWED the BEGIN line of a genuinely real key appended later in the same
+# file — the enclosing finding was dropped entirely. Allowlisting would have
+# silenced the false positive and left that hole open underneath it. Reshaping
+# removed both. An allowlist hides a finding; a reshaped fixture removes the
+# reason for one, and cannot hide the next thing that lands beside it.
+#
+# The same applies to THIS file. leak-scan.py is not exempt from itself and this
+# config is inside its shipping set, so every shape named above is written
+# without its literal delimiters — a verbatim example here would fail the release
+# gate on its own documentation, permanently.
+#
 # --- allowlist template — copy, fill in the evidence, uncomment -------------
 #
 # [[allowlists]]

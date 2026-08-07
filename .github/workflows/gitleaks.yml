@@ -6,7 +6,10 @@ name: gitleaks
 # scoped to what it lints; a secret can land in any file in the tree — a skill
 # doc, a setup script, a sample note, a workflow — so scoping this one would
 # create exactly the blind spot it exists to close. Cheap enough not to care:
-# 8 commits / ~578 KB scanned in ~85 ms locally.
+# under a second locally on this repo, ~12s on a full-size instance vault of
+# ~120MB. Stated as an order of magnitude on purpose — an exact commit count
+# here would rot within a week and then read as a stale measurement rather than
+# a live one. See .gitleaks.toml, "CITE A COMMIT, NOT A COUNT".
 on:
   push:
     branches: [main]
@@ -22,6 +25,20 @@ jobs:
   gitleaks:
     name: Scan history for secrets
     runs-on: ubuntu-latest
+    # Job-scoped, not step-scoped: the install step verifies these and the final
+    # notice reports the version it actually ran, so both need them in scope.
+    #
+    # PIN THE SCANNER. Unpinned, it changes behaviour under you in both
+    # directions — new rules appear and break the build on unchanged history,
+    # and existing regexes tighten so coverage shrinks with nothing to show for
+    # it. Bumping means re-verifying the allowlist policy in .gitleaks.toml
+    # against the new version, not just editing a number here.
+    env:
+      GITLEAKS_VERSION: '8.30.1'
+      # sha256 of gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz, taken from that
+      # release's checksums.txt. Bump both together; a stale hash fails closed,
+      # which is correct.
+      GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
     steps:
       # Third-party actions are pinned to a full commit SHA, not a tag — tags
       # are mutable and a compromised upstream can repoint v5 at new code.
@@ -58,20 +75,28 @@ jobs:
       #      org-owned forks is a template nobody keeps.
       #   2. The tarball can be checksum-verified here, in the open, which is
       #      the same supply-chain property SHA-pinning buys for actions.
-      # Bumping: change GITLEAKS_VERSION and GITLEAKS_SHA256 together, taking
-      # the hash from gitleaks_<version>_checksums.txt in the same release. A
-      # stale hash fails closed (sha256sum -c exits non-zero), which is correct.
+      # Version and hash are job-scoped env, at the top of this job.
       - name: Install gitleaks (pinned + checksum-verified)
-        env:
-          GITLEAKS_VERSION: '8.30.1'
-          GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
         run: |
           set -euo pipefail
           TARBALL="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl --fail --silent --show-error --location \
+          # --retry: a flaky download must not read as a broken gate. Without it
+          # a transient release-CDN blip fails the job with a checksum-shaped
+          # error, which is the one failure here people are tempted to rerun past.
+          curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
             -o "$TARBALL" \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${TARBALL}"
-          echo "${GITLEAKS_SHA256}  ${TARBALL}" | sha256sum -c -
+          # Checked explicitly rather than relying on `set -e` alone, so the log
+          # says WHY the job stopped. A bare non-zero exit from sha256sum here
+          # looks like infrastructure noise; it is a refusal to run an unverified
+          # scanner binary, and the two deserve different reactions.
+          if ! echo "${GITLEAKS_SHA256}  ${TARBALL}" | sha256sum -c -; then
+            echo "::error title=gitleaks::Checksum mismatch on ${TARBALL}. \
+          Refusing to run an unverified scanner binary. If you just bumped \
+          GITLEAKS_VERSION, take the matching hash from that release's \
+          gitleaks_<version>_checksums.txt and update GITLEAKS_SHA256 with it."
+            exit 1
+          fi
           tar -xzf "$TARBALL" gitleaks
           install -m 0755 gitleaks /usr/local/bin/gitleaks
           rm -f "$TARBALL" gitleaks
@@ -79,9 +104,12 @@ jobs:
 
       # `git` mode, not `dir` mode. The difference matters twice over:
       #
-      #   - `git` walks the commit graph (default log-opts cover all refs, not
-      #     just HEAD — verified: this repo has 7 commits on main and 8 across
-      #     refs, and gitleaks reports 8 scanned). That is the whole point of
+      #   - `git` walks the commit graph, and its default log-opts cover ALL
+      #     refs rather than just HEAD — verified on this repo by comparing
+      #     `git rev-list --count main` against `--count --all` and watching
+      #     gitleaks report the larger of the two. Re-run that pair if you want
+      #     the current numbers; they change on every push, which is why they
+      #     are not written down here. That coverage is the whole point of
       #     fetch-depth: 0 above. `dir` reads only the checked-out worktree and
       #     would never see a secret that was added and later removed.
       #   - `dir` reads files off disk and does NOT respect .gitignore
@@ -92,9 +120,30 @@ jobs:
       #     privacy denylist itself. A gate that fires on files that cannot
       #     leak is a gate people learn to skip.
       #
-      # --redact=80 keeps 20% of a matched value in the log: enough to locate
-      # the string in your tree, not enough to reuse it. CI logs are readable by
-      # anyone with repo read access and are retained after the run.
+      # --redact, at FULL strength. This previously ran --redact=80, which keeps
+      # 20% of every matched value in the log on the theory that a fragment helps
+      # you locate the string without being reusable. Both halves of that are
+      # weaker than they sound. A fragment plus a known provider prefix is a
+      # materially shorter brute force than the whole value; and the location is
+      # already printed without it, since findings carry file, line, commit and
+      # rule id regardless.
+      #
+      # The deciding factor is who reads the log, which this file cannot know.
+      # The upstream template is public, so its CI logs are world-readable and
+      # permanent. Instances are private today — but a private repo can be made
+      # public, forked to a runner, or have a log pasted into a ticket, and the
+      # gate that exists to stop a credential going public should not be the
+      # thing that publishes a fifth of it. Full redaction is correct in every
+      # one of those cases, so it is the one that ships.
+      #
+      # To see actual values, reproduce locally and keep them local:
+      #     gitleaks git . --config .gitleaks.toml
+      #
+      # No --report-path either, deliberately. A report file would be uploaded or
+      # cached by whoever touches this next, and it is coupled to the flag above:
+      # drop --redact and that artifact starts carrying every matched credential
+      # in the clear into storage that outlives the run. Not writing one removes
+      # the failure mode instead of documenting it.
       #
       # Rules and allowlist policy live in .gitleaks.toml. This gate covers
       # SECRETS only — the identity/PII half is leak-scan.py, which cannot run
@@ -104,10 +153,16 @@ jobs:
         run: |
           gitleaks git . \
             --config .gitleaks.toml \
-            --redact=80 \
+            --redact \
             --no-banner \
             --exit-code 1
 
+      # The commit count is repeated here for the same reason it is printed in
+      # the shallow-clone assert: a pass is only meaningful next to how much was
+      # scanned, and "no secrets found" over one commit looks identical to "no
+      # secrets found" over the whole history unless the number is on screen.
       - name: Done
         if: success()
-        run: echo "::notice title=gitleaks::No secrets found in full history."
+        run: |
+          echo "::notice title=gitleaks::No secrets found across \
+          $(git rev-list --count --all) commits (gitleaks ${GITLEAKS_VERSION})."
