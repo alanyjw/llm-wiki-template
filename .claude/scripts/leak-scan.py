@@ -76,9 +76,10 @@ What it checks
                     enough that a substring hit is almost always real.
 2. Structural and regex checks - always on, no personal data required.
    Absolute home paths, email addresses, document/calendar URLs carrying an id,
-   machine-local artifacts, stray binaries under `assets/`, and a per-directory
-   ceiling on content files. Plus the five retained credential rules noted
-   above, kept only where gitleaks was measured to miss.
+   machine-local artifacts, stray binaries under `assets/`, ANY shipping-set
+   file the text gate could not read (see below), and a per-directory ceiling
+   on content files. Plus the five retained credential rules noted above, kept
+   only where gitleaks was measured to miss.
 3. Git history, not just the worktree. A name committed and later deleted is
    still readable in the commit that introduced it, and public forever once
    pushed. Blobs reachable from any ref but absent from HEAD are scanned
@@ -88,6 +89,29 @@ What it checks
    discards, so it was invisible here until 2026-07-30. Outside a git repo the
    history pass is skipped with a warning. This is the part gitleaks structurally
    cannot do - see the header note.
+
+Nothing in the shipping set goes unread
+---------------------------------------
+An unread file is a silent PASS, which is worse than a noisy FAIL. Two rules:
+  * text files are scanned STREAMING, line by line, at any realistic size. This
+    file used to cap reads at 5MB and report the skip as an INFO line that never
+    reached the exit code, so a 6MB transcript with a denylisted name on its
+    last line printed "PASS - no findings, structure clean" while the identical
+    text truncated to 4MB reported two leaks. The only variable was file size.
+    The template itself ships stubs, so nothing in it trips a 5MB cap; every
+    vault built from it trips it constantly, because book transcripts, note-app
+    exports and whisperx output are routinely multi-MB. The gate reported PASS
+    on exactly the files most likely to carry a name. The cap had to go rather
+    than be raised: any read budget names a file size above which the gate lies,
+    and raising it only moves where the lie starts.
+  * anything still unread red-lines as a STRUCTURAL PROBLEM: over the hard
+    refusal ceiling (`MAX_FILE_BYTES`, now only a guard against pathological
+    input), binary (NUL in the first 8KB), or unreadable. Same severity as the
+    history-blob equivalent (`MAX_BLOB_BYTES`), which red-lined from the start -
+    the two paths were inconsistent and the lenient one was the worktree one.
+    Binaries are deliberately NOT advisory: a screenshot or a PDF leaks in
+    pixels, which no text gate can read, and `assets/` has always been treated
+    this way.
 
 Scope
 -----
@@ -171,8 +195,19 @@ WIKI_CONTENT_DIRS = frozenset({
     "wiki/insights", "wiki/plans", "wiki/projects",
 })
 
-MAX_FILE_BYTES = 5 * 1024 * 1024
+# Worktree text files are streamed line by line, so size is not a reason to
+# skip one. This is a refusal ceiling for pathological input only (a multi-
+# hundred-MB single-line file would otherwise become one huge string), and
+# exceeding it red-lines - see `unread_problems`. It is NOT a scan budget: the
+# 5MB budget this ceiling used to be silently skipped real multi-MB transcripts
+# and printed PASS. See the docstring section on unread files.
+MAX_FILE_BYTES = 128 * 1024 * 1024
+
+# History blobs are read whole through `git cat-file --batch`, so this one IS a
+# real budget. Exceeding it has always red-lined as a structural problem.
 MAX_BLOB_BYTES = 1 * 1024 * 1024
+
+BINARY_SNIFF_BYTES = 8192
 BLOB_BATCH = 128
 DEFAULT_HISTORY_LIMIT = 20000
 DEFAULT_MAX_CONTENT_FILES = 5
@@ -329,6 +364,18 @@ Finding = namedtuple("Finding", "where line kind value count")
 
 EMPTY_DENYLIST = Denylist((), ())
 
+# Why a shipping-set file went unread. Every reason red-lines; the strings are
+# the human-facing explanation, keyed here so the report can group them.
+UNREAD_REASONS = (
+    ("oversize",
+     "over the {mb}MB refusal ceiling - split the file or inspect it by hand"),
+    ("binary",
+     "binary (NUL byte in the first 8KB) - a text gate cannot read pixels, so "
+     "inspect them by hand or keep them out of the shipping set"),
+    ("unreadable",
+     "unreadable (permissions, or vanished mid-scan) - inspect them by hand"),
+)
+
 
 # --- Denylist loading --------------------------------------------------------
 
@@ -436,15 +483,18 @@ def scan_line(line, denylist, use_regex):
         yield from builtin_hits(line)
 
 
-def scan_text(text, where, denylist, use_regex=True):
-    """Return a tuple of Findings for a whole document.
+def scan_lines(lines, where, denylist, use_regex=True):
+    """Return a tuple of Findings for an iterable of lines.
+
+    Takes an ITERABLE, not a string, so a multi-MB file can be streamed at
+    bounded memory instead of being size-capped and skipped.
 
     One Finding per (kind, value) pair per document, carrying the first line it
     appeared on and an occurrence count - repeating the same name forty times
     buries the other findings.
     """
     seen = {}
-    for lineno, line in enumerate(text.splitlines(), 1):
+    for lineno, line in enumerate(lines, 1):
         for kind, value in scan_line(line, denylist, use_regex):
             key = (kind, value)
             first, count = seen.get(key, (lineno, 0))
@@ -454,32 +504,73 @@ def scan_text(text, where, denylist, use_regex=True):
         for (kind, value), (first, count) in seen.items())
 
 
-def read_text_file(path):
-    """Return decoded text, or None for binary / oversized / unreadable files."""
+def scan_text(text, where, denylist, use_regex=True):
+    """Findings for a whole in-memory document."""
+    return scan_lines(text.splitlines(), where, denylist, use_regex)
+
+
+def unread_reason(path):
+    """Why `path` cannot be text-scanned, or None when it can be.
+
+    Size alone is never a reason below MAX_FILE_BYTES: the file is streamed.
+    """
     try:
-        if path.stat().st_size > MAX_FILE_BYTES:
-            return None
-        data = path.read_bytes()
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            head = handle.read(BINARY_SNIFF_BYTES)
     except OSError:
-        return None
-    if b"\x00" in data[:8192]:
-        return None
-    return data.decode("utf-8", errors="replace")
+        return "unreadable"
+    if b"\x00" in head:
+        return "binary"
+    if size > MAX_FILE_BYTES:
+        return "oversize"
+    return None
+
+
+def scan_file(path, where, denylist, use_regex=True):
+    """Stream one file. Returns (findings, unread_reason) - reason None if read."""
+    reason = unread_reason(path)
+    if reason is not None:
+        return (), reason
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            return scan_lines(handle, where, denylist, use_regex), None
+    except OSError:
+        return (), "unreadable"
 
 
 def scan_files(root, rel_paths, denylist):
-    """Scan a set of repo-relative paths. Returns (findings, skipped)."""
-    findings, skipped = [], []
+    """Scan a set of repo-relative paths.
+
+    Returns (findings, unread) where `unread` is ((rel, reason), ...). Every
+    unread entry becomes a structural problem - an unread file in the shipping
+    set must never print PASS.
+    """
+    findings, unread = [], []
     for rel in sorted(rel_paths):
         if rel in NEVER_SCAN:
             continue
-        text = read_text_file(root / rel)
-        if text is None:
-            skipped.append(rel)
+        hits, reason = scan_file(
+            root / rel, rel, denylist, use_regex=rel not in REGEX_EXEMPT)
+        if reason is not None:
+            unread.append((rel, reason))
             continue
-        findings.extend(
-            scan_text(text, rel, denylist, use_regex=rel not in REGEX_EXEMPT))
-    return tuple(findings), tuple(skipped)
+        findings.extend(hits)
+    return tuple(findings), tuple(unread)
+
+
+def unread_problems(unread):
+    """Structural problem lines for files the text gate could not read."""
+    problems = []
+    for reason, explanation in UNREAD_REASONS:
+        hit = sorted(rel for rel, why in unread if why == reason)
+        if not hit:
+            continue
+        problems.append(
+            f"{len(hit)} file(s) in the scan set were not text-scanned: "
+            + explanation.format(mb=MAX_FILE_BYTES // (1024 * 1024))
+            + f" (e.g. {hit[0]})")
+    return tuple(problems)
 
 
 # --- File selection ----------------------------------------------------------
@@ -927,7 +1018,7 @@ def main(argv=None):
               f"{len(denylist.substrings)} substring term(s) "
               f"from {denylist_path}")
 
-    findings, skipped = scan_files(root, rel_paths, denylist)
+    findings, unread = scan_files(root, rel_paths, denylist)
 
     history_findings, history_problems = (), ()
     if opts.no_history:
@@ -951,17 +1042,17 @@ def main(argv=None):
                 print(f"          {ident}  x{len(shas)}  [{shown}]")
 
     structural_set = shipping if shipping is not None else rel_paths
-    problems = check_structure(
-        root, structural_set, in_repo, opts) + history_problems
+    # An unread file is a structural problem, not an INFO line: exit 0 with a
+    # file nobody read is the one outcome this gate must never produce. Same
+    # severity as the history-blob equivalent, which red-lined from the start.
+    problems = (check_structure(root, structural_set, in_repo, opts)
+                + history_problems + unread_problems(unread))
 
     print()
     print_findings("LEAK", findings)
     print_findings("HISTORY", history_findings)
     for problem in problems:
         print(f"STRUCT  {problem}")
-    if skipped:
-        print(f"INFO    {len(skipped)} binary/oversized file(s) not text-scanned "
-              f"- review them by hand")
 
     print_census(content_census(structural_set), opts.max_content_files)
 

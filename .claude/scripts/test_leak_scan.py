@@ -69,9 +69,18 @@ here so a reader of this file is not the last to find out:
    `git tag -a v1 -m msg` made with a denylisted tagger email - asserting the
    census entry.
 
+A third divergence was CLOSED on 2026-08-06 and is recorded here so the list
+reads as history rather than as a shrinking set of unexplained edits: this copy
+capped worktree reads at 5MB and reported the skip as an advisory INFO line, so
+a file over the cap printed PASS whatever was in it. The sibling had already
+removed the cap in favour of a streaming read and made any unread file a
+structural problem; that mechanism is now ported here. See
+`TestWorktreeUnreadFiles`, and the "Nothing in the shipping set goes unread"
+section of `leak-scan.py`.
+
 `leak-scan.py`'s own header still describes the copies as identical and does not
-carry this note. Adding it there is part of closing these; this file is the
-interim record, not a substitute for it.
+carry the two open notes above. Adding it there is part of closing them; this
+file is the interim record, not a substitute for it.
 
 NO DIRTY LITERAL SITS ON ONE SOURCE LINE
 ----------------------------------------
@@ -318,6 +327,7 @@ class ScannerTestCase(unittest.TestCase):
         return leak_scan.parse_args([str(root), *extra])
 
     def worktree_findings(self, root):
+        """-> (findings, unread), exactly what `main()` gets from `scan_files`."""
         shipping = leak_scan.shipping_set(root)
         self.assertIsNotNone(shipping, "fixture is not a git repo")
         return leak_scan.scan_files(root, shipping, self.denylist)
@@ -366,12 +376,12 @@ class ScannerTestCase(unittest.TestCase):
 
         Without this, a history test could be passing for the wrong reason.
         """
-        findings, skipped = self.worktree_findings(root)
+        findings, unread = self.worktree_findings(root)
         self.assertEqual(
             findings, (),
             f"fixture is not worktree-clean; the history assertion below would "
             f"prove nothing: {pairs(findings)}")
-        self.assertEqual(skipped, ())
+        self.assertEqual(unread, (), "a fixture file went unread")
 
 
 # --- 1. Denylist loading (template-specific: the denylist is an argument) ----
@@ -1608,7 +1618,7 @@ class TestUnconfiguredGate(ScannerTestCase):
         self.assertEqual(proc.returncode, 1, out)
 
 
-# --- 11. History budget: degrade loudly, never silently ----------------------
+# --- 11. Read budgets: degrade loudly, never silently ------------------------
 
 class TestHistoryBudget(ScannerTestCase):
     """A huge or oversized history must red-line, not quietly go unscanned.
@@ -1681,6 +1691,145 @@ class TestHistoryBudget(ScannerTestCase):
         self.assertIn(("denylist-term", "Jane Doe"), pairs(findings))
 
 
+class TestWorktreeUnreadFiles(ScannerTestCase):
+    """The worktree half of the same rule: nothing in the scan set goes unread.
+
+    This is where it went wrong. The worktree path capped reads at 5MB and
+    filed the skip under an INFO line that never reached the exit code, so a
+    6MB note with a denylisted name on its last line printed "PASS - no
+    findings, structure clean" while the identical text truncated to 4MB
+    reported two leaks. The only variable was file size. The history path had
+    red-lined its equivalent budget from the start - the two were inconsistent
+    and the lenient one was this one.
+
+    A template ships stubs, so nothing inside it trips a 5MB cap and the bug is
+    invisible here. Every vault built from it trips it constantly: book
+    transcripts, note-app exports and whisperx output are routinely multi-MB,
+    which made the gate quietest on exactly the files most likely to carry a
+    name.
+    """
+
+    # Just past the read budget that used to exist. `patch_constant` cannot
+    # stand in for this one: the claim under test is that NO read budget skips a
+    # real file any more, so the fixture has to be genuinely bigger than the
+    # budget that used to exist. About a second to scan - the slowest test in
+    # this suite, and the only one that fails if the cap comes back.
+    OVER_OLD_CAP = 5 * 1024 * 1024 + 4096
+
+    def big_file_repo(self, last_line, name="transcript.md"):
+        """A repo whose shipping set holds one file past the old 5MB cap.
+
+        Left untracked rather than committed: `git ls-files --others` puts it in
+        the shipping set either way, and committing 5MB of filler only buys
+        zlib time. The interesting content is the LAST line, because a
+        truncating read is exactly what misses it.
+        """
+        root = self.minimal_repo()
+        git(root, "commit", "-q", "-m", "chore: init")
+        path = root / name
+        with path.open("w", encoding="utf-8") as handle:
+            while handle.tell() < self.OVER_OLD_CAP:
+                handle.write("wholly innocuous filler prose, repeated\n")
+            handle.write(last_line + "\n")
+        self.assertGreater(
+            path.stat().st_size, 5 * 1024 * 1024,
+            "fixture must exceed the budget it exists to disprove")
+        return root
+
+    def test_file_past_the_old_5mb_cap_is_streamed_and_scanned(self):
+        root = self.big_file_repo("reviewed by Jane Doe")
+        findings, unread = self.worktree_findings(root)
+        self.assertEqual(unread, (), "a big text file is read, not skipped")
+        self.assertIn(("denylist-term", "Jane Doe"), pairs(findings))
+
+        rc, out = self.run_scan(str(root))
+        self.assertEqual(
+            rc, 1, f"a name on the last line of a big file must not PASS:\n{out}")
+        self.assertIn("Jane Doe", out)
+
+    def test_streamed_scan_agrees_with_in_memory_scan(self):
+        """Streaming must not change WHAT is found, only how it is read.
+
+        A file handle yields lines with their trailing newline; `scan_text()`
+        strips them. Cheap to get wrong at a line boundary, and a silent
+        difference between the two entry points is how one of them rots.
+        """
+        text = ("prose\n" + assign_bare("api_key", ANTHROPIC_KEY, sep="=")
+                + "\nmet Jane Doe\n" + FAKE_HOME + "/notes\n")
+        path = self.workdir / "sample.md"
+        path.write_text(text, encoding="utf-8")
+
+        streamed, reason = leak_scan.scan_file(path, "s", self.denylist)
+        self.assertIsNone(reason)
+        self.assertEqual(
+            {(f.kind, f.value, f.line) for f in streamed},
+            {(f.kind, f.value, f.line)
+             for f in leak_scan.scan_text(text, "s", self.denylist)})
+        self.assertTrue(streamed, "fixture found nothing, so it proves nothing")
+
+    def test_binary_file_in_the_scan_set_red_lines(self):
+        root = self.minimal_repo()
+        git(root, "commit", "-q", "-m", "chore: init")
+        # A name inside a binary is the honest case: this one is readable as
+        # bytes, but a screenshot or a PDF carries it in pixels where no text
+        # gate can reach it at all. Either way nobody read the file.
+        (root / "export.dat").write_bytes(b"\x00\x01\x02Jane Doe\n")
+
+        _findings, unread = self.worktree_findings(root)
+        self.assertEqual(unread, (("export.dat", "binary"),))
+
+        rc, out = self.run_scan(str(root))
+        self.assertEqual(rc, 1, f"an unread binary must not PASS:\n{out}")
+        self.assertIn("not text-scanned", out)
+        self.assertIn("export.dat", out)
+
+    def test_file_over_the_refusal_ceiling_red_lines(self):
+        # MAX_FILE_BYTES is no longer a scan budget, but it is still a refusal
+        # ceiling for pathological input, and crossing it must red-line rather
+        # than repeat the original bug at a larger number.
+        root = self.minimal_repo()
+        git(root, "commit", "-q", "-m", "chore: init")
+        (root / "huge.md").write_text(
+            "wholly innocuous prose, comfortably past eight bytes\n",
+            encoding="utf-8")
+        self.patch_constant("MAX_FILE_BYTES", 8)
+
+        findings, unread = self.worktree_findings(root)
+        self.assertEqual(findings, (), "a refused file is not read at all")
+        self.assertIn(("huge.md", "oversize"), unread)
+
+        rc, out = self.run_scan(str(root))
+        self.assertEqual(rc, 1, f"a refused file must not PASS:\n{out}")
+        self.assertIn("refusal ceiling", out)
+
+    def test_file_under_the_refusal_ceiling_is_scanned(self):
+        # NEGATIVE CONTROL: the ceiling must not swallow ordinary files, or the
+        # fix would be "always fail", which is the same as having no gate.
+        root = self.minimal_repo()
+        git(root, "commit", "-q", "-m", "chore: init")
+        (root / "note.md").write_text("met Jane Doe\n", encoding="utf-8")
+        self.patch_constant("MAX_FILE_BYTES", 1024)
+
+        findings, unread = self.worktree_findings(root)
+        self.assertEqual(unread, ())
+        self.assertIn(("denylist-term", "Jane Doe"), pairs(findings))
+
+    def test_vanished_file_is_reported_unreadable_not_silently_dropped(self):
+        # A file listed by `git ls-files` and gone by the time it is opened.
+        # Asserted at the scan_files() level rather than through main(),
+        # because shipping_set() re-checks is_file() and would drop it before
+        # the scan - the race it models happens between those two moments.
+        # Deliberately not tested via chmod: this suite must never skip, and a
+        # permissions fixture is a no-op when the tests run as root.
+        root = self.temp_root("gone")
+        findings, unread = leak_scan.scan_files(
+            root, {"vanished.md"}, self.denylist)
+        self.assertEqual(findings, ())
+        self.assertEqual(unread, (("vanished.md", "unreadable"),))
+        self.assertTrue(
+            any("unreadable" in p for p in leak_scan.unread_problems(unread)))
+
+
 # --- 12. Report rendering: the gate must not leak what it catches -----------
 
 class TestSecretPreviewMasking(ScannerTestCase):
@@ -1732,34 +1881,24 @@ class TestCrashResistance(ScannerTestCase):
         self.assertIn("not a git repo", out)
         self.assertNotIn("Traceback", out)
 
-    def test_binary_file_is_reported_as_unread_not_scanned(self):
+    def test_binary_file_outside_a_repo_does_not_crash_the_walk(self):
+        # Crash resistance only - that an unread binary RED-LINES is
+        # TestWorktreeUnreadFiles' subject. This assertion was the inverse
+        # until 2026-08-06: it pinned the old advisory behaviour (INFO line,
+        # exit 0) and carried a note saying that if this copy ever adopted the
+        # sibling's structural treatment, this was the assertion to flip. It
+        # was flipped, deliberately, when the 5MB read cap came out - an unread
+        # file in the shipping set is a silent PASS, which is the one outcome
+        # this gate must never produce.
         root = self.temp_root("bin")
         (root / "blob.dat").write_bytes(b"\x00\x01\x02Jane Doe\n")
-        _findings, skipped = leak_scan.scan_files(
+        _findings, unread = leak_scan.scan_files(
             root, leak_scan.walk_all_files(root), self.denylist)
-        self.assertEqual(skipped, ("blob.dat",))
+        self.assertEqual(unread, (("blob.dat", "binary"),))
         rc, out = self.run_scan(str(root))
         self.assertIn("not text-scanned", out)
         self.assertNotIn("Traceback", out)
-        # NOTE, deliberately asserted rather than assumed: an unread file is
-        # ADVISORY here - it prints an INFO line and the gate still exits 0.
-        # The sibling private copy treats it as a structural problem, on the
-        # grounds that a file nobody read is a silent PASS (a screenshot or a
-        # binary export can carry a name no text gate will ever see). If this
-        # copy adopts that behaviour, this assertion is the one to flip, and
-        # flipping it should be a decision rather than a surprise.
-        self.assertEqual(rc, 0, out)
-
-    def test_oversized_file_is_not_read_and_is_reported(self):
-        root = self.temp_root("huge")
-        (root / "huge.md").write_text(
-            "wholly innocuous prose, comfortably past eight bytes\n",
-            encoding="utf-8")
-        self.patch_constant("MAX_FILE_BYTES", 8)
-        findings, skipped = leak_scan.scan_files(
-            root, {"huge.md"}, self.denylist)
-        self.assertEqual(findings, (), "an oversize file is not read at all")
-        self.assertEqual(skipped, ("huge.md",))
+        self.assertEqual(rc, 1, out)
 
     def test_nonexistent_path_exits_2(self):
         missing = self.workdir / "nope" / "deeper"
