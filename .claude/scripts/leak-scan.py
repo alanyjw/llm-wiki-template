@@ -113,6 +113,28 @@ An unread file is a silent PASS, which is worse than a noisy FAIL. Two rules:
     pixels, which no text gate can read, and `assets/` has always been treated
     this way.
 
+Acknowledged findings
+---------------------
+Git history is immutable, so a finding in an already-pushed commit has exactly
+two honest resolutions: rewrite and force-push, or read it and sign it off.
+There is no third where it lapses on its own. A gate with no way to record the
+second decision sits permanently red, and a gate that always fails is one you
+stop reading - so acknowledgement is a first-class mechanism here, in two forms
+that are NOT interchangeable:
+
+  * BY LOCATION - `.claude/scripts/leak-accepted.txt`, tracked, one
+    `<where>:<line>:<kind>` fingerprint per line with the reason in a comment
+    above it. Fingerprints carry NO value, because that file is published and a
+    gitleaks-style fingerprint would reprint the string it suppresses. For a
+    one-off already in pushed history.
+  * BY VALUE - the `[exempt]` section of the gitignored denylist, for something
+    deliberately public that recurs forever, such as the git identity the repo
+    is committed under. Its entries are personal data, which is why they live
+    in the gitignored file rather than the tracked one.
+
+Suppressions are counted in every run and stale entries are reported, so
+neither list can quietly grow into a blanket.
+
 Scope
 -----
 By default only the SHIPPING SET is scanned - `git ls-files --cached --others
@@ -162,6 +184,10 @@ from pathlib import Path
 
 DENYLIST_REL = ".claude/scripts/denylist.txt"
 EXAMPLE_REL = ".claude/scripts/denylist.example.txt"
+
+# Acknowledged findings. TRACKED, unlike the denylist - see `load_accepted` for
+# the format and for why its entries carry no value.
+ACCEPTED_REL = ".claude/scripts/leak-accepted.txt"
 
 # Never opened at all: its entire content is the search terms themselves.
 NEVER_SCAN = frozenset({DENYLIST_REL})
@@ -359,10 +385,10 @@ SECRET_KINDS = frozenset({
     "api-token", "slack-token", "secret-assignment", "private-key",
 })
 
-Denylist = namedtuple("Denylist", "words substrings")
+Denylist = namedtuple("Denylist", "words substrings exempt")
 Finding = namedtuple("Finding", "where line kind value count")
 
-EMPTY_DENYLIST = Denylist((), ())
+EMPTY_DENYLIST = Denylist((), (), frozenset())
 
 # Why a shipping-set file went unread. Every reason red-lines; the strings are
 # the human-facing explanation, keyed here so the report can group them.
@@ -382,11 +408,17 @@ UNREAD_REASONS = (
 def load_denylist(path):
     """Parse a denylist file into a Denylist. Raises ValueError on bad syntax.
 
-    Format: `#` full-line comments, `[words]` / `[substrings]` section headers,
-    one term per line. Inline comments are NOT supported - a `#` mid-line is
-    part of the term, because handles and paths legitimately contain one.
+    Format: `#` full-line comments, `[words]` / `[substrings]` / `[exempt]`
+    section headers, one term per line. Inline comments are NOT supported - a
+    `#` mid-line is part of the term, because handles and paths legitimately
+    contain one.
+
+    `[exempt]` is the INVERSE of the other two: a value listed there is dropped
+    from the built-in regex findings wherever it appears. It lives in this file
+    rather than in the tracked acceptance list because its entries are
+    themselves personal data - see `scan_line` for when to reach for which.
     """
-    words, subs, section = [], [], None
+    words, subs, exempt, section = [], [], [], None
     warnings = []
     for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.strip()
@@ -394,20 +426,22 @@ def load_denylist(path):
             continue
         if line.startswith("[") and line.endswith("]"):
             section = line[1:-1].strip().lower()
-            if section not in ("words", "substrings"):
+            if section not in ("words", "substrings", "exempt"):
                 raise ValueError(
-                    f"{path}:{lineno}: unknown section [{section}] "
-                    f"- expected [words] or [substrings]")
+                    f"{path}:{lineno}: unknown section [{section}] - expected "
+                    f"[words], [substrings] or [exempt]")
             continue
         if section is None:
             raise ValueError(
                 f"{path}:{lineno}: term {line!r} appears before any "
-                f"[words] / [substrings] section header")
+                f"[words] / [substrings] / [exempt] section header")
         if len(line) < 2:
             raise ValueError(
                 f"{path}:{lineno}: term {line!r} is too short - a one-character "
                 f"term matches everything and makes the gate useless")
-        if section == "words":
+        if section == "exempt":
+            exempt.append(line.lower())
+        elif section == "words":
             if any(ch.isspace() for ch in line):
                 warnings.append(
                     f"{path}:{lineno}: {line!r} contains whitespace; multi-word "
@@ -416,7 +450,58 @@ def load_denylist(path):
         else:
             subs.append(line)
     # dict.fromkeys dedups while preserving first-seen order.
-    return Denylist(tuple(dict.fromkeys(words)), tuple(dict.fromkeys(subs))), tuple(warnings)
+    return (Denylist(tuple(dict.fromkeys(words)),
+                     tuple(dict.fromkeys(subs)),
+                     frozenset(exempt)),
+            tuple(warnings))
+
+
+def load_accepted(path):
+    """Parse the acceptance file into a set of fingerprints.
+
+    Format: `#` full-line comments, one fingerprint per line:
+
+        <where>:<line>:<kind>
+
+    e.g. `wiki/sources/note.md@a1b2c3d:12:home-path`. Everything before the last
+    two colons is `where`, so a path containing a colon still parses.
+
+    THE VALUE IS DELIBERATELY NOT PART OF THE FINGERPRINT. This file is tracked
+    and published; a gitleaks-style fingerprint carrying the matched text would
+    publish the very string it exists to suppress. The cost is that accepting
+    `home-path` on one line accepts any home path on that line, which is the
+    right granularity anyway: the unit of acceptance is "a human read this line
+    and signed it off".
+
+    Accepting a HISTORY finding is the normal case - history is immutable, so
+    blob fingerprints are stable, and the only alternative is rewriting
+    published commits. Accepting a WORKTREE finding is exceptional and fragile
+    on purpose: line numbers shift as a file is edited, so a shifted acceptance
+    stops applying and the gate gets LOUDER rather than quieter. Failing safe in
+    that direction is the point.
+    """
+    if not path.exists():
+        return frozenset()
+    return frozenset(
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#"))
+
+
+def fingerprint(finding):
+    return f"{finding.where}:{finding.line}:{finding.kind}"
+
+
+def partition_accepted(findings, accepted):
+    """(reported, suppressed_count, fingerprints that matched something)."""
+    reported, used = [], set()
+    for finding in findings:
+        mark = fingerprint(finding)
+        if mark in accepted:
+            used.add(mark)
+            continue
+        reported.append(finding)
+    return tuple(reported), len(findings) - len(reported), used
 
 
 @lru_cache(maxsize=512)
@@ -480,7 +565,25 @@ def scan_line(line, denylist, use_regex):
         if term.lower() in low:
             yield "denylist-term", term
     if use_regex:
-        yield from builtin_hits(line)
+        for kind, value in builtin_hits(line):
+            # `[exempt]` drops a finding by VALUE, everywhere, rather than by
+            # location. It exists for the one class the acceptance file handles
+            # badly: a value that is deliberately public and recurs forever -
+            # the author's own git identity, an org address a README is
+            # supposed to show. Accepting that per location would need a new
+            # fingerprint every time the file is edited, and a suppression list
+            # that has to be re-edited on every commit is one that gets pasted
+            # into blindly.
+            #
+            # It lives in the gitignored denylist rather than the tracked
+            # acceptance list because its entries ARE personal data. Keep it to
+            # values already published by construction: an exempt term silences
+            # that string in every file and every commit, so anything still
+            # worth protecting does not belong here. Never put a home path in
+            # it - fix the path instead.
+            if value.lower() in denylist.exempt:
+                continue
+            yield kind, value
 
 
 def scan_lines(lines, where, denylist, use_regex=True):
@@ -895,6 +998,21 @@ def preview(kind, value):
     return value
 
 
+def print_suppressed(count, stale):
+    """Always printed when non-empty: suppression must never be invisible.
+
+    Stale entries are reported too. An acceptance file that accumulates dead
+    fingerprints is how a suppression list quietly grows into a blanket.
+    """
+    if count:
+        print(f"INFO    {count} finding(s) suppressed by {ACCEPTED_REL} "
+              f"- each one was read and signed off there, with a reason")
+    if stale:
+        print(f"NOTE    {len(stale)} stale entry/entries in {ACCEPTED_REL} "
+              f"matched nothing - delete them: {', '.join(sorted(stale)[:3])}"
+              + ("..." if len(stale) > 3 else ""))
+
+
 def print_findings(label, findings):
     for finding in sorted(findings, key=lambda f: (f.where, f.line)):
         times = f" (x{finding.count})" if finding.count > 1 else ""
@@ -1041,6 +1159,12 @@ def main(argv=None):
                 shown = ", ".join(shas[:4]) + ("..." if len(shas) > 4 else "")
                 print(f"          {ident}  x{len(shas)}  [{shown}]")
 
+    accepted = load_accepted(root / ACCEPTED_REL)
+    findings, n_worktree_ok, used_a = partition_accepted(findings, accepted)
+    history_findings, n_history_ok, used_b = partition_accepted(
+        history_findings, accepted)
+    suppressed, stale = n_worktree_ok + n_history_ok, accepted - (used_a | used_b)
+
     structural_set = shipping if shipping is not None else rel_paths
     # An unread file is a structural problem, not an INFO line: exit 0 with a
     # file nobody read is the one outcome this gate must never produce. Same
@@ -1053,6 +1177,7 @@ def main(argv=None):
     print_findings("HISTORY", history_findings)
     for problem in problems:
         print(f"STRUCT  {problem}")
+    print_suppressed(suppressed, stale)
 
     print_census(content_census(structural_set), opts.max_content_files)
 

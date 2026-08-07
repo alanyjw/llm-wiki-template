@@ -1,0 +1,55 @@
+# Findings read and signed off. Consumed by .claude/scripts/leak-scan.py.
+#
+# SHIPPED EMPTY ON PURPOSE. Every entry you add is a leak you have decided to
+# publish, so the file starts with none and grows only by deliberate act.
+#
+# Format: one `<where>:<line>:<kind>` fingerprint per line, `#` comments.
+# NO VALUE is recorded, deliberately -- this file is TRACKED, and a
+# gitleaks-style fingerprint carrying the matched text would reprint the very
+# string it exists to suppress. Describe findings in the comments without
+# quoting them: the first draft of the equivalent file in a sibling repo spelled
+# its values out in its own notes, and the scanner flagged it, correctly.
+#
+# Every run prints how many findings this file suppressed and reports entries
+# that matched nothing. A suppression list that is invisible, or that
+# accumulates dead entries, is how a gate quietly becomes a rubber stamp.
+#
+# ---------------------------------------------------------------------------
+# WHEN AN ENTRY IS LEGITIMATE
+# ---------------------------------------------------------------------------
+# A finding in git history has exactly two honest resolutions: rewrite the
+# commits and force-push, or read it and sign it off here. There is no third
+# option where it goes away on its own -- once pushed, it is public forever.
+# So the bar for an entry is "a human looked at this and decided publishing it
+# was acceptable", not "this is annoying".
+#
+# Rewriting is cheaper than it sounds for a repo with one author and no
+# downstream clones: `git filter-repo --replace-text` plus a force-push. Prefer
+# it whenever the fact is genuinely private. Sign-off is for facts that are
+# already public by implication -- a username the repo URL states anyway.
+#
+# ---------------------------------------------------------------------------
+# THIS FILE'S COMPANION
+# ---------------------------------------------------------------------------
+# This suppresses by LOCATION. The `[exempt]` section of the gitignored
+# denylist suppresses by VALUE, and is the right tool for something
+# deliberately public that recurs forever -- the git identity the repo is
+# committed under. Location for one-off history; value for the permanent case.
+# Using location for the permanent case means a fresh fingerprint every time
+# the file is touched, and a list re-edited that often stops being read.
+#
+# ---------------------------------------------------------------------------
+# ONE BEHAVIOUR THAT LOOKS LIKE A BUG AND IS NOT
+# ---------------------------------------------------------------------------
+# When the worktree is CLEAN, blobs already in HEAD are skipped by the history
+# pass -- the worktree pass covered that content. When it is DIRTY, they are
+# scanned as well. An entry covering a HEAD blob therefore matches on a dirty
+# tree and reads as stale on a clean one.
+#
+# ---------------------------------------------------------------------------
+# EXAMPLE (commented out -- delete these two lines once you add a real entry)
+# ---------------------------------------------------------------------------
+# A note committed in 2019 named a former employer in its frontmatter. Rewriting
+# was declined because the repo has 400 downstream forks; the name is on the
+# author's public CV anyway.
+# raw/notes/2019-offsite.md@a1b2c3d:4:denylist-term

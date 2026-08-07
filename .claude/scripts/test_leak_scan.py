@@ -1975,6 +1975,155 @@ class TestCrashResistance(ScannerTestCase):
             "test's docstring; the fix is in scan_commit_metadata(), not here")
 
 
+# --- 13b. Acknowledged findings ----------------------------------------------
+
+class TestAcceptedFindings(ScannerTestCase):
+    """Suppression by location, and the guarantees that keep it honest.
+
+    A gate with no way to record "I read this and it is fine" sits permanently
+    red on any repo whose pushed history holds one accepted fact, and a gate
+    that always fails is one that gets ignored. So suppression exists - and
+    every property below is what stops it becoming a rubber stamp.
+    """
+
+    def leaking_repo(self):
+        """A repo whose worktree holds one denylist hit, committed."""
+        root = self.minimal_repo()
+        (root / "note.md").write_text("written by Jane Doe\n", encoding="utf-8")
+        git(root, "add", "note.md")
+        git(root, "commit", "-qm", "init")
+        return root
+
+    def accept(self, root, *fingerprints):
+        path = root / leak_scan.ACCEPTED_REL
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "# signed off in the fixture\n" + "\n".join(fingerprints) + "\n",
+            encoding="utf-8")
+
+    def test_absent_acceptance_file_suppresses_nothing(self):
+        """The default is no suppression - the file is opt-in, not opt-out."""
+        root = self.leaking_repo()
+        self.assertEqual(
+            leak_scan.load_accepted(root / leak_scan.ACCEPTED_REL), frozenset())
+        rc, out = self.run_scan(str(root))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("denylist-term", out)
+
+    def test_a_matching_fingerprint_suppresses_the_finding(self):
+        root = self.leaking_repo()
+        self.accept(root, "note.md:1:denylist-term", "note.md:1:denylist-name")
+        _rc, out = self.run_scan(str(root))
+        self.assertNotIn("LEAK    note.md", out)
+
+    def test_suppression_is_always_reported(self):
+        """Silent suppression is indistinguishable from no finding at all."""
+        root = self.leaking_repo()
+        self.accept(root, "note.md:1:denylist-term", "note.md:1:denylist-name")
+        _rc, out = self.run_scan(str(root))
+        self.assertIn("suppressed by", out)
+        self.assertIn(leak_scan.ACCEPTED_REL, out)
+
+    def test_stale_entries_are_reported(self):
+        """A list that accumulates dead entries drifts into a blanket."""
+        root = self.leaking_repo()
+        self.accept(root, "gone.md@deadbeef:9:home-path")
+        _rc, out = self.run_scan(str(root))
+        self.assertIn("stale entry", out)
+        self.assertIn("gone.md@deadbeef:9:home-path", out)
+
+    def test_a_fingerprint_does_not_suppress_a_different_kind(self):
+        """Accepting one rule on a line must not silence every rule on it."""
+        root = self.leaking_repo()
+        self.accept(root, "note.md:1:home-path")
+        rc, out = self.run_scan(str(root))
+        self.assertEqual(rc, 1, out)
+        self.assertIn("denylist-term", out)
+
+    def test_a_fingerprint_does_not_suppress_a_different_line(self):
+        """Line numbers shift as a file is edited; the acceptance must lapse.
+
+        Failing OPEN here would be the dangerous direction - an edit that moved
+        a leak would inherit the sign-off given to whatever used to be there.
+        """
+        root = self.leaking_repo()
+        (root / "note.md").write_text(
+            "padding\nwritten by Jane Doe\n", encoding="utf-8")
+        self.accept(root, "note.md:1:denylist-term")
+        rc, out = self.run_scan(str(root))
+        self.assertEqual(rc, 1, out)
+
+    def test_comments_and_blank_lines_are_ignored(self):
+        path = self.workdir / "accepted.txt"
+        path.write_text(
+            "# a comment\n\n  \na.md:1:email\n  b.md:2:home-path  \n",
+            encoding="utf-8")
+        self.assertEqual(
+            leak_scan.load_accepted(path), {"a.md:1:email", "b.md:2:home-path"})
+
+    def test_a_path_containing_a_colon_still_parses(self):
+        """`where` is everything before the LAST two colons, not the first."""
+        finding = leak_scan.Finding("odd:name.md@abc1234", 7, "email", "x", 1)
+        self.assertEqual(
+            leak_scan.fingerprint(finding), "odd:name.md@abc1234:7:email")
+
+
+class TestExemptValues(ScannerTestCase):
+    """Suppression by value, for what is public by construction.
+
+    Its companion is the acceptance file. The split matters: a location
+    fingerprint for a value that recurs forever needs re-editing every time the
+    file changes, and a list re-edited that often stops being read.
+    """
+
+    def denylist_with_exempt(self, *values):
+        path = self.workdir / "exempt-denylist.txt"
+        path.write_text(
+            FIXTURE_DENYLIST_TEXT + "\n[exempt]\n" + "\n".join(values) + "\n",
+            encoding="utf-8")
+        denylist, warnings = leak_scan.load_denylist(path)
+        self.assertEqual(warnings, ())
+        return denylist
+
+    def kinds(self, denylist, text):
+        return {k for k, _v in leak_scan.scan_line(text, denylist, True)}
+
+    def test_an_exempt_value_is_dropped(self):
+        """PERSONAL_EMAIL, not an example.com address - the built-in
+        EXEMPT_EMAIL_DOMAINS list already silences those, so a fixture using one
+        would pass whether or not [exempt] worked at all."""
+        line = "contact: " + PERSONAL_EMAIL
+        unrelated = "nobody" + "@" + "nowhere.test"
+        self.assertIn("email", self.kinds(self.denylist_with_exempt(unrelated), line))
+        self.assertNotIn(
+            "email", self.kinds(self.denylist_with_exempt(PERSONAL_EMAIL), line))
+
+    def test_matching_is_case_insensitive(self):
+        denylist = self.denylist_with_exempt(PERSONAL_EMAIL)
+        self.assertNotIn("email", self.kinds(denylist, PERSONAL_EMAIL.upper()))
+
+    def test_exemption_is_exact_not_substring(self):
+        """A prefix must not silence a longer, different address."""
+        denylist = self.denylist_with_exempt(PERSONAL_EMAIL)
+        self.assertIn(
+            "email", self.kinds(denylist, PERSONAL_EMAIL + ".attacker" + ".test"))
+
+    def test_exempt_does_not_touch_denylist_terms(self):
+        """[exempt] filters the REGEX battery only - names still fire."""
+        denylist = self.denylist_with_exempt("Jane Doe")
+        self.assertIn("denylist-term", self.kinds(denylist, "by Jane Doe"))
+
+    def test_an_unknown_section_is_still_rejected(self):
+        path = self.workdir / "bad.txt"
+        path.write_text("[nonsense]\nfoo\n", encoding="utf-8")
+        with self.assertRaises(ValueError) as caught:
+            leak_scan.load_denylist(path)
+        self.assertIn("[exempt]", str(caught.exception))
+
+    def test_empty_denylist_has_an_empty_exempt_set(self):
+        self.assertEqual(leak_scan.EMPTY_DENYLIST.exempt, frozenset())
+
+
 # --- 14. Suite hygiene -------------------------------------------------------
 
 class TestSuiteHygiene(unittest.TestCase):

@@ -79,3 +79,23 @@ kindle-exporter
 transcribe-pipeline
 Project Bluebird
 The Loft
+
+[exempt]
+# The INVERSE of the two sections above: values that are ALREADY PUBLIC by
+# construction and would otherwise be reported on every run, forever. An entry
+# here silences that EXACT value (case-insensitively) in every file and every
+# commit, so keep the list short and keep it to things this repo already
+# publishes about you.
+#
+# The case it exists for: the address in your git config's [user] block. It is
+# in the author field of every commit, so a file that sets it discloses nothing
+# the log does not -- but the generic `email` rule cannot know that, and would
+# fire on a fresh blob sha every time that file is edited.
+#
+# Do NOT put an absolute home path here. That rule is the most valuable one in
+# the file and it catches a portability defect as well as a privacy one; fix the
+# path instead. For a one-off already sitting in pushed history, use a location
+# fingerprint in leak-accepted.txt rather than silencing the value everywhere.
+#
+# Delete the placeholder below along with the rest.
+jane.doe@example.com
