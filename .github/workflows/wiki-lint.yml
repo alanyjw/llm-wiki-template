@@ -7,6 +7,8 @@ on:
       - 'wiki/**'
       - '.obsidian-linter.jsonc'
       - '.claude/scripts/wiki-lint.py'
+      - '.claude/scripts/test_wiki_lint.py'
+      - '.claude/scripts/wiki-lint.config.json'
       - '.claude/scripts/check-date-updated.py'
       - '.claude/scripts/regenerate-index.py'
       - '.github/workflows/wiki-lint.yml'
@@ -15,6 +17,8 @@ on:
       - 'wiki/**'
       - '.obsidian-linter.jsonc'
       - '.claude/scripts/wiki-lint.py'
+      - '.claude/scripts/test_wiki_lint.py'
+      - '.claude/scripts/wiki-lint.config.json'
       - '.claude/scripts/check-date-updated.py'
       - '.claude/scripts/regenerate-index.py'
       - '.github/workflows/wiki-lint.yml'
@@ -141,6 +145,26 @@ jobs:
       #      the page set — measured at roughly 30s on a mid-size vault, paid on
       #      every push, for output nobody reads per-commit. Run them on demand
       #      during a lint pass instead.
+      # Runs BEFORE Layer 2, because a linter whose own rules are broken cannot
+      # give a trustworthy verdict on the vault — a green Layer 2 from a broken
+      # gate is worse than a red one. Covers WIKI002's attachment exemption,
+      # whose whole difficulty is that it behaves differently on a developer's
+      # disk (attachments present) than in CI (gitignored, absent) — the one
+      # rule nobody can check by running the tool locally.
+      #
+      # `unittest` exits 0 on "Ran 0 tests", so the count is asserted too: a
+      # suite that collected nothing would otherwise pass while checking nothing.
+      - name: Layer 2a — wiki-lint.py self-test (gates the build)
+        run: |
+          set -o pipefail
+          python3 .claude/scripts/test_wiki_lint.py -v 2>&1 | tee /tmp/wiki-lint-tests.log
+          COUNT=$(grep -oE '^Ran [0-9]+ test' /tmp/wiki-lint-tests.log | grep -oE '[0-9]+' | tail -1 || true)
+          if [ -z "$COUNT" ] || [ "$COUNT" -eq 0 ]; then
+            echo "::error title=wiki-lint self-test::The suite reported no tests. A gate whose tests did not run is a gate nobody has checked."
+            exit 1
+          fi
+          echo "::notice title=wiki-lint self-test::$COUNT tests passed."
+
       - name: Layer 2 — wiki-lint.py (gates the build)
         id: layer2
         run: |

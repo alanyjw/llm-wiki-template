@@ -68,6 +68,10 @@ WATCH = [
     "SYNC.md",
     ".claude/scripts/wiki-lint.py",
     ".claude/scripts/wiki-lint.config.json",
+    # Watched for the same reason as the privacy gate's suite below: the tests
+    # are what make the linter takeable by plain checkout. An instance holding
+    # wiki-lint.py without them cannot tell an upstream fix from a regression.
+    ".claude/scripts/test_wiki_lint.py",
     ".claude/scripts/regenerate-index.py",
     ".claude/scripts/check-date-updated.py",
     ".claude/scripts/qmd-refresh-hook.sh",

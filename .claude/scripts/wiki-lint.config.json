@@ -36,6 +36,8 @@
     "wiki/notes-import-manifest.md"
   ],
 
+  "_comment_attachment_extensions": "REPLACE. Deliberately NOT set here, and you almost certainly should not set it either — this comment documents the knob, and leaving the key absent is what keeps you on the built-in list as upstream extends it. What it does: extensions of files kept in the gitignored attachments folder. An unresolvable wikilink to one is skipped by WIKI002 instead of reported broken, because the file is absent from every clone; without the skip such a link passes on your disk and fails in CI, which is a report of which machine ran the linter rather than a lint result. Set it to [] if and only if you COMMIT your attachments — they then exist in CI and the check becomes real. The built-in default is the permissive value, so this knob can only tighten WIKI002, never loosen it. Leading dots optional; lowercased on load.",
+
   "_comment_expected_h2_by_type": "REPLACE. Canonical H2 section names per page type, checked by `--report schema`. Replace rather than merge, because a body schema is one whole contract copied from your CLAUDE.md; merging two instances' lists would demand the union of both and mark every page non-conforming.",
   "expected_h2_by_type": {
     "project": [

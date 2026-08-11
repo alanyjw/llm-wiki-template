@@ -279,7 +279,11 @@ Governs *how* synthesis prose is written. Worked examples: `docs/CLAUDE-MD-EXTEN
 
 ## Image Handling
 
-Raw notes may reference images as `![](Files/filename.jpg)` (legacy format); wiki pages use `![[filename.jpg]]` (Obsidian native). All images live flat in `assets/` — convert paths when bringing raw images into the wiki. Read image files directly for context; they often carry the substance.
+All attachments live flat in `assets/`, which **`.gitignore` excludes** — they stay on your disk and never reach the repo. Raw notes may reference them as `![](Files/filename.jpg)` (legacy) or `![[filename.jpg]]`; wiki pages use `![[filename.jpg]]`, converting the path on the way in.
+
+Because the files are absent from every clone, `wiki-lint.py` **skips** attachment links rather than resolving them (`ATTACHMENT_EXTENSIONS`) — otherwise every one of them would pass locally and fail in CI. Two consequences worth knowing: a mistyped attachment name is not caught by any gate, and if you **do** commit your attachments, set `"attachment_extensions": []` in `wiki-lint.config.json` to get the check back.
+
+Read image files directly with vision when ingesting — slides, whiteboards and screenshots usually carry the substance — and write what they say into the page as prose. The link renders the image for a reader in Obsidian; the prose is what makes it retrievable.
 
 ## About the Vault Owner
 

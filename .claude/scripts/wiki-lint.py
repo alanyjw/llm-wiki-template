@@ -11,7 +11,10 @@ Checks the vendor tool (markdownlint-obsidian) can't do correctly today:
    uses path-based resolution from --vault-root, which can't handle
    this vault's mixed [[sources/foo]] (wiki-implicit) + [[raw/notes-import/foo]]
    (vault-absolute) link conventions. Reimplements Obsidian's name-fuzzy
-   resolution (path suffix-match against vault file index).
+   resolution (path suffix-match against vault file index). Links to
+   attachment file types (see ATTACHMENT_EXTENSIONS) are exempt: `assets/*`
+   is gitignored, so those targets are absent from every clone and the check
+   could only ever report which machine ran it.
 
 3. WIKI003 — broken wikilink anchor. The #anchor part of a wikilink
    must resolve to an actual heading or glossary term in the target file.
@@ -261,6 +264,29 @@ ORPHAN_ALLOWLIST: set[str] = {
     "wiki/notes-import-manifest.md",
 }
 
+# Extensions of files that live in the attachments folder, which .gitignore
+# excludes (`assets/*`). WIKI002 cannot judge a link to one of these: the byte
+# it would resolve against is deliberately absent from every clone, so on CI
+# EVERY such link reports broken while on the author's disk EVERY one passes.
+# That is not a lint result, it is a report of which machine ran the linter — so
+# an unresolvable link to one of these is skipped rather than flagged.
+#
+# The cost is real and bounded: a mistyped attachment name goes uncaught. The
+# alternative costs more — the check as written fails only in CI, where it looks
+# like a broken link and gets "fixed" by deleting a correct link.
+#
+# An instance that TRACKS its attachments should set `attachment_extensions` to
+# [] in wiki-lint.config.json; there the files are present in CI and the check
+# is meaningful. Kept as data, not a regex, so config can replace it wholesale.
+ATTACHMENT_EXTENSIONS = {
+    # images
+    "png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "heic", "heif", "avif", "tiff",
+    # audio / video
+    "mp3", "wav", "m4a", "ogg", "flac", "aac", "mp4", "mov", "mkv", "webm", "avi",
+    # documents an attachments folder collects
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pages", "numbers", "key",
+}
+
 
 # ---------- Optional per-instance config ----------
 #
@@ -290,6 +316,9 @@ ORPHAN_ALLOWLIST: set[str] = {
 #   severities                    (no way to demote an error to a warning)
 # and REQUIRED_KEYS_BY_TYPE is union-only (see apply_config), so no config value
 # can shorten a built-in type's required-key list and thereby dodge FM004.
+# ATTACHMENT_EXTENSIONS is settable, and note which direction that cuts: the
+# built-in value is the PERMISSIVE one, so config can only ever tighten WIKI002
+# here, never loosen it.
 
 CONFIG_RELPATH = ".claude/scripts/wiki-lint.config.json"
 
@@ -303,6 +332,7 @@ _CONFIG_KEYS = frozenset({
     "tag_taxonomy",
     "orphan_allowlist",
     "expected_h2_by_type",
+    "attachment_extensions",
 })
 
 
@@ -393,6 +423,7 @@ def apply_config(data: dict) -> None:
     """
     global REQUIRED_KEYS_BY_TYPE, _STOPWORDS, _NON_TERM_BOLD
     global TAG_TAXONOMY, _KNOWN_TAGS, ORPHAN_ALLOWLIST, EXPECTED_H2_BY_TYPE
+    global ATTACHMENT_EXTENSIONS
 
     # MERGE (union-only). New `type:` values are registered so they stop tripping
     # FM003 — instances name their special pages differently (one calls its
@@ -456,6 +487,17 @@ def apply_config(data: dict) -> None:
         EXPECTED_H2_BY_TYPE = _cfg_str_list_map(
             "expected_h2_by_type", data["expected_h2_by_type"]
         )
+
+    # REPLACE, and the one knob whose useful setting is the EMPTY list. It names
+    # the file types this instance keeps out of git; merging would make that
+    # unsayable, because an instance that tracks its attachments could never
+    # shrink the list back and WIKI002 would stay switched off for images
+    # forever. Replace lets `[]` mean "my attachments are committed, check them".
+    if "attachment_extensions" in data:
+        ATTACHMENT_EXTENSIONS = {
+            e.lstrip(".").lower()
+            for e in _cfg_str_list("attachment_extensions", data["attachment_extensions"])
+        }
 
 
 @dataclass
@@ -547,6 +589,21 @@ def resolve_wikilink(target: str, vault_root: Path, index: dict[str, list[Path]]
                 matches.append(p)
 
     return matches
+
+
+def _is_attachment_target(target: str) -> bool:
+    """True if a wikilink target names a file type kept out of git.
+
+    Deliberately does NOT reuse resolve_wikilink's extension regex, which caps an
+    extension at four characters and so reads `.numbers` as no extension at all.
+    Here the extension is whatever follows the final dot of the last path
+    segment; a leading-dot name (`.gitignore`) has none.
+    """
+    last_segment = target.rsplit("/", 1)[-1]
+    dot = last_segment.rfind(".")
+    if dot <= 0:
+        return False
+    return last_segment[dot + 1:].lower() in ATTACHMENT_EXTENSIONS
 
 
 # ---------- Markdown structure helpers ----------
@@ -654,6 +711,11 @@ def check_broken_wikilinks(
             if target.startswith(("http://", "https://", "mailto:")):
                 continue
             matches = resolve_wikilink(target, vault_root, index)
+            if not matches and _is_attachment_target(target):
+                # Untracked by design — see ATTACHMENT_EXTENSIONS. Note this is
+                # reached only when resolution ALREADY failed, so a link that
+                # does resolve keeps every downstream check unchanged.
+                continue
             if not matches:
                 col = m.start() + 1
                 findings.append(
