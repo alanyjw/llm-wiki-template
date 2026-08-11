@@ -61,7 +61,8 @@
     "OFM064": { "enabled": false }, // duplicate-tags → reads glossary `#Term` anchor refs and hex colors as tags
 
     // === OFM Embeds, Callouts, Block-refs, Highlights, Frontmatter ===
-    // All default-enabled — this is the group that catches real bugs.
+    // All default-enabled except OFM022 — this is the group that catches real bugs.
+    "OFM022": { "enabled": false }, // embed-target-missing → probes the real filesystem for non-markdown embed targets, and `assets/*` is gitignored, so every attachment embed fails in CI while passing on the author's disk. Same argument as WIKI002's attachment skip in wiki-lint.py. Narrow by construction: OFM022 covers ONLY non-markdown embeds (markdown ones are OFM020's, resolved against the in-memory index, still on), and OFM021/OFM024 still catch bad embed syntax and disallowed extensions. What is lost: a mistyped attachment filename goes uncaught. Re-enable it if you commit your attachments — and set `attachment_extensions: []` in wiki-lint.config.json at the same time, since the two are the same decision.
 
     // === Standard markdownlint — disable cosmetic / stylistic noise ===
     "MD004": { "enabled": false }, // unordered-list-style
