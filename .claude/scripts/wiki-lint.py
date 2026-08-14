@@ -73,6 +73,7 @@ which is real money to pay on every push for output nobody reads per-commit.
 - `--report glossary-coverage` — bold terms with no glossary entry/link (Q2, advisory)
 - `--report schema`            — per-type body-structure adherence (Q4, advisory)
 - `--report duplicates`        — near-duplicate pages by lexical similarity (Q5, advisory)
+- `--report stale`             — pages the vault's own data says went stale (advisory)
 
 Output:
 - Human-readable to stdout (file:line:col CODE message)
@@ -103,6 +104,7 @@ Usage:
   python3 .claude/scripts/wiki-lint.py --report glossary-coverage
   python3 .claude/scripts/wiki-lint.py --report schema
   python3 .claude/scripts/wiki-lint.py --report duplicates
+  python3 .claude/scripts/wiki-lint.py --report stale
 """
 
 from __future__ import annotations
@@ -210,9 +212,77 @@ REPORT_TAGS = "tags"
 REPORT_GLOSSARY = "glossary-coverage"  # Q2
 REPORT_SCHEMA = "schema"               # Q4
 REPORT_DUPLICATES = "duplicates"       # Q5
+REPORT_STALE = "stale"                 # pruning-visibility report
+
+# Thresholds for `--report stale`, in days. Deliberately generous: this report
+# exists to make pruning VISIBLE, not to nag. A page tripping STALE-A is making
+# a claim about itself (`status: active`) that its own date contradicts.
+# Per-instance via `stale_thresholds` in wiki-lint.config.json — a vault worked
+# daily and one worked monthly do not share a definition of "stale".
+STALE_ACTIVE_DAYS = 90       # active plan/project untouched for a quarter
+STALE_SYNTHESIS_DAYS = 365   # insight/topic untouched for a year (informational)
+
+MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+# Self-set alarms a corpus writes and nothing rings, e.g. "Re-check Nov 2026",
+# "revisit 2027-01-15". The date may be ISO or "Mon YYYY"; label punctuation
+# (`**Revisit:**`, `Revisit —`) and up to three connectives ("in", "by",
+# "after", "this again in") may sit between the verb and the date.
+#
+# Two exclusions are deliberate, and they are the same judgement made twice:
+#
+# - Bare "review" is out. Wikis use it as a NOUN in historical page titles
+#   ("Architecture Review Mar 2021"), which records the past rather than
+#   setting an alarm for the future. "review again" stays in — the adverb is
+#   what turns it back into an alarm.
+# - Past-tense and third-person forms are out (revisited / rechecked /
+#   revisits). "We revisited Mar 2021 and confirmed the call" records an alarm
+#   that already rang; matching it rings forever on work that is finished.
+#
+# Quarters ("revisit in Q1 2027") are out of scope on purpose: a quarter is a
+# per-instance convention, not a date, and guessing its start month would be a
+# fabrication in a report whose whole value is that its dates are real.
+RECHECK_RE = re.compile(
+    r"\b(?:re-?check(?:ing)?|revisit(?:ing)?|review again)\b[\s,:*—–-]*"
+    r"(?:\b(?:at|in|by|on|around|this|again|after|before|next|come|from)\b\s*){0,3}"
+    r"(?:\bthe\b\s*)?"
+    r"(?:"
+    #   "Mar 2027" / "March 2027" / "Mar. 2027". The \b closes the month token,
+    #   so "Marketing 2027" and "Maybe 2027" are not read as dates.
+    r"(?P<mon>Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?"
+    r"|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?"
+    r"|Dec(?:ember)?)\b\.?\s+(?P<year>20\d{2})"
+    #   "2027-01-15" — the only date format this template mandates anywhere
+    #   (frontmatter, Recent-updates, decisions logs), so it has to match here.
+    r"|(?P<iso>20\d{2}-\d{2}-\d{2})"
+    r")",
+    re.IGNORECASE,
+)
+
+# Inline code spans, stripped before alarm-matching: `re-check Jan 2020` inside
+# backticks documents the syntax rather than setting an alarm in it.
+INLINE_CODE_RE = re.compile(r"`[^`]*`")
+
+# Append-only chronological records, skipped by STALE-B. An alarm written into
+# a log entry cannot be silenced by editing it — the entry records what was
+# said on a date — so it would ring forever with no legal way to fix it.
+STALE_B_SKIP_PREFIXES = ("wiki/log/",)
+STALE_B_SKIP_FILES = ("wiki/log.md", "wiki/reflections-log.md")
+
+# Frontmatter date keys STALE-A / STALE-C consult, in order. `date_updated` is
+# only RECOMMENDED for these types (soft FM006), never required, so keying on
+# it alone leaves schema-legal pages silently unassessed.
+STALE_DATE_KEYS_BY_TYPE = {
+    "plan": ("date_updated", "date_created"),
+    "project": ("date_updated", "date_started"),
+    "insight": ("date_updated", "date_created"),
+    "topic": ("date_updated", "date_created"),
+}
 ALL_REPORTS = [
     REPORT_SYMMETRY, REPORT_ORPHANS, REPORT_CROSS_LINKS, REPORT_TAGS,
-    REPORT_GLOSSARY, REPORT_SCHEMA, REPORT_DUPLICATES,
+    REPORT_GLOSSARY, REPORT_SCHEMA, REPORT_DUPLICATES, REPORT_STALE,
 ]
 
 # Synthesis folders for the advisory body/coverage/dupe reports.
@@ -333,6 +403,7 @@ _CONFIG_KEYS = frozenset({
     "orphan_allowlist",
     "expected_h2_by_type",
     "attachment_extensions",
+    "stale_thresholds",
 })
 
 
@@ -423,7 +494,7 @@ def apply_config(data: dict) -> None:
     """
     global REQUIRED_KEYS_BY_TYPE, _STOPWORDS, _NON_TERM_BOLD
     global TAG_TAXONOMY, _KNOWN_TAGS, ORPHAN_ALLOWLIST, EXPECTED_H2_BY_TYPE
-    global ATTACHMENT_EXTENSIONS
+    global ATTACHMENT_EXTENSIONS, STALE_ACTIVE_DAYS, STALE_SYNTHESIS_DAYS
 
     # MERGE (union-only). New `type:` values are registered so they stop tripping
     # FM003 — instances name their special pages differently (one calls its
@@ -498,6 +569,38 @@ def apply_config(data: dict) -> None:
             e.lstrip(".").lower()
             for e in _cfg_str_list("attachment_extensions", data["attachment_extensions"])
         }
+
+    # REPLACE, per key. `--report stale` is advisory and never gates CI, so these
+    # are a reporting preference rather than a rule — a vault worked daily and
+    # one worked monthly genuinely disagree about when `status: active` starts
+    # to look like a lie. Each key is optional; an absent one keeps its built-in.
+    if "stale_thresholds" in data:
+        th = data["stale_thresholds"]
+        if not isinstance(th, dict):
+            raise ConfigError(
+                f"`stale_thresholds` must be an object, got {type(th).__name__}"
+            )
+        unknown = sorted(k for k in th if k not in ("active_days", "synthesis_days"))
+        if unknown:
+            raise ConfigError(
+                f"`stale_thresholds` has unknown key(s): {', '.join(unknown)}. "
+                "Known keys: active_days, synthesis_days"
+            )
+        for key in ("active_days", "synthesis_days"):
+            if key not in th:
+                continue
+            v = th[key]
+            # bool is a subclass of int, so `true` would otherwise read as 1 —
+            # a typo silently becoming a one-day threshold is the worst outcome.
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                raise ConfigError(
+                    f"`stale_thresholds.{key}` must be a positive integer number "
+                    f"of days, got {v!r}"
+                )
+            if key == "active_days":
+                STALE_ACTIVE_DAYS = v
+            else:
+                STALE_SYNTHESIS_DAYS = v
 
 
 @dataclass
@@ -1461,6 +1564,174 @@ def report_orphans(vault_root: Path) -> int:
     return len(orphans)
 
 
+def _stale_today() -> date:
+    """Today — overridable with WIKI_LINT_TODAY=YYYY-MM-DD.
+
+    A test seam, and the only honest way to pin the threshold boundaries. An
+    exact-90-day fixture is written by the test process and judged by a separate
+    linter process; between the two, midnight can pass and the age becomes 91.
+    Freezing the clock is worth more than a boundary assertion that flakes once
+    a night. Affects `--report stale` alone, which gates nothing — a malformed
+    value is ignored rather than fatal, since no build outcome rides on it.
+    """
+    raw = os.environ.get("WIKI_LINT_TODAY", "").strip()
+    if ISO_DATE_RE.match(raw):
+        try:
+            y, m, d = (int(x) for x in raw.split("-"))
+            return date(y, m, d)
+        except ValueError:
+            pass
+    return date.today()
+
+
+def report_stale(vault_root: Path) -> int:
+    """Surface pages the vault's own data says have gone stale (advisory).
+
+    Deliberately NOT a hard gate. Every other check here is keyed to *content* —
+    it fires because a file says something wrong, so a clean tree stays clean.
+    Staleness is keyed to *wall-clock time*, so a hard gate would turn CI red on
+    a day nobody touched the repo. That is a bad property, and it is why pruning
+    is surfaced on demand rather than enforced in CI.
+
+    Four signals, strongest first:
+
+    - STALE-A  status/date contradiction. A `plan`/`project` marked
+               `status: active` whose date is older than STALE_ACTIVE_DAYS. An
+               "active" page nobody has touched in a quarter is finished, dead,
+               or lying — and the page itself is the only thing asserting
+               otherwise.
+    - STALE-B  an expired self-set alarm. A corpus writes lines like
+               "Re-check Nov 2026" and then nothing rings. This rings them.
+    - STALE-C  aging synthesis: insight/topic pages untouched for longer than
+               STALE_SYNTHESIS_DAYS. Informational — age alone is not rot, and
+               a stable page may simply be correct.
+    - STALE-D  pages this report could not judge: no date key, an unparseable
+               one, or a date in the future. Counted and listed rather than
+               skipped, because a page with no freshness evidence is the one
+               most likely to be stale, and dropping it silently makes "A=0"
+               read as *clean* when it means *unassessed*.
+
+    A/C read `date_updated` and fall back per type (STALE_DATE_KEYS_BY_TYPE) —
+    keying on `date_updated` alone would be silent on schema-legal pages, since
+    it is only ever a recommended key, never a required one.
+    """
+    wiki_root = vault_root / "wiki"
+    if not wiki_root.exists():
+        print(f"ERROR: wiki/ not found under {vault_root}", file=sys.stderr)
+        return 0
+
+    today = _stale_today()
+
+    def parse_iso(value: str) -> date | None:
+        v = value.strip().strip("\"'")[:10]
+        if not ISO_DATE_RE.match(v):
+            return None
+        try:
+            y, m, d = (int(x) for x in v.split("-"))
+            return date(y, m, d)
+        except ValueError:
+            return None
+
+    contradictions: list[tuple[int, str, str, str, str]] = []
+    alarms: list[tuple[str, int, str]] = []
+    aging: list[tuple[int, str, str, str]] = []
+    unjudged: list[tuple[str, str, str]] = []
+
+    for p in sorted(wiki_root.rglob("*.md")):
+        rel = str(p.relative_to(vault_root)).replace(os.sep, "/")
+        try:
+            text = p.read_text(encoding="utf-8")
+        except Exception:
+            continue
+
+        parsed = _extract_frontmatter(text)
+        if parsed:
+            fm = parsed[0]
+            ptype = fm.get("type", "").strip().strip("\"'").lower()
+            status = fm.get("status", "").strip().strip("\"'").lower()
+            in_scope = (
+                (ptype in ("plan", "project") and status == "active")
+                or ptype in ("insight", "topic")
+            )
+            if in_scope:
+                # First key that PARSES wins, so a malformed `date_updated`
+                # still falls back to `date_created`. The malformed value is
+                # kept anyway — if nothing parses, it is the useful reason.
+                when: date | None = None
+                key = ""
+                bad = ""
+                for candidate in STALE_DATE_KEYS_BY_TYPE[ptype]:
+                    if candidate not in fm:
+                        continue
+                    raw = fm[candidate].strip()
+                    when = parse_iso(raw)
+                    if when:
+                        key = candidate
+                        break
+                    if not bad:
+                        bad = f"unparseable {candidate}: {raw!r}"
+                age = (today - when).days if when else 0
+                if when is None:
+                    unjudged.append((rel, ptype, bad or "no date key"))
+                elif age < 0:
+                    unjudged.append(
+                        (rel, ptype, f"{key} is in the future: {when.isoformat()}")
+                    )
+                elif ptype in ("plan", "project"):
+                    if age > STALE_ACTIVE_DAYS:
+                        contradictions.append((age, rel, ptype, key, when.isoformat()))
+                elif age > STALE_SYNTHESIS_DAYS:
+                    aging.append((age, rel, key, when.isoformat()))
+
+        # STALE-B — expired self-set re-check dates, anywhere in the body.
+        if rel in STALE_B_SKIP_FILES or rel.startswith(STALE_B_SKIP_PREFIXES):
+            continue
+        for lineno, line, in_code, in_fm in iter_lines_with_context(text):
+            if in_code or in_fm:
+                continue
+            line = INLINE_CODE_RE.sub(" ", line)
+            for m in RECHECK_RE.finditer(line):
+                if m.group("iso"):
+                    due = parse_iso(m.group("iso"))
+                    if due is None:      # e.g. 2027-13-45 — matched, not a date
+                        continue
+                else:
+                    # RECHECK_RE is the authority on the key set: `mon` can only
+                    # be one of the twelve month tokens, so this cannot KeyError.
+                    month = MONTHS[m.group("mon").lower()[:3]]
+                    # An alarm named by month is due once that month has BEGUN,
+                    # so compare against the first — "Nov 2026" rings on Nov 1.
+                    due = date(int(m.group("year")), month, 1)
+                if due <= today:
+                    alarms.append((rel, lineno, m.group(0).strip()))
+
+    print("=== stale pages (advisory — pruning is a habit this makes visible) ===")
+    print()
+    print(f"STALE-A  active plan/project not updated in >{STALE_ACTIVE_DAYS}d: {len(contradictions)}")
+    for age, rel, ptype, key, when in sorted(contradictions, reverse=True):
+        print(f"  {age:>4}d  {rel}  ({ptype}, status: active, {key} {when})")
+    print()
+    print(f"STALE-B  self-set re-check dates now due: {len(alarms)}")
+    for rel, lineno, snippet in sorted(alarms):
+        print(f"        {rel}:{lineno}  → {snippet}")
+    print()
+    print(f"STALE-C  insight/topic not updated in >{STALE_SYNTHESIS_DAYS}d: {len(aging)}")
+    for age, rel, key, when in sorted(aging, reverse=True):
+        print(f"  {age:>4}d  {rel}  ({key} {when})")
+    print()
+    print(f"STALE-D  in scope but no usable date — unassessed, not clean: {len(unjudged)}")
+    for rel, ptype, why in sorted(unjudged):
+        print(f"        {rel}  ({ptype}, {why})")
+
+    total = len(contradictions) + len(alarms) + len(aging) + len(unjudged)
+    print()
+    print(
+        f"Total: {total}  (A={len(contradictions)} B={len(alarms)} "
+        f"C={len(aging)} D={len(unjudged)})"
+    )
+    return total
+
+
 def report_symmetry(vault_root: Path) -> int:
     """Check that entity pages' Appears-In references the source pages that cite them.
 
@@ -1892,6 +2163,8 @@ def main() -> int:
             report_schema(vault_root)
         elif args.report == REPORT_DUPLICATES:
             report_duplicates(vault_root)
+        elif args.report == REPORT_STALE:
+            report_stale(vault_root)
         return 0  # advisory — always exit 0
 
     enabled_checks = set(args.check or ALL_CHECKS)

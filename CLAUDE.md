@@ -216,7 +216,7 @@ Every file under `wiki/` is linted — there are no per-file carve-outs; `.obsid
 
 *Soft gates (warning — reported, but the script still exits 0):* `FM002` missing `type:`; `FM003` unknown `type:` (no schema registered); `FM006` recommended keys; `RU002` callout has no dated entry; `RU003` newest callout entry is older than `date_updated`; `RU004` callout holds more than 3 entries (older roll off — callout-only trims don't need a `date_updated` bump); `PROV001` synthesis should cite `[[wiki/sources/...]]`, not `[[raw/...]]` (`projects/` exempt in its Related sources section); `WIKI007` anchor-prose source-count mismatch on topic pages. Warnings still deserve clearing — they're the ones that quietly rot retrieval — so treat a clean run as zero of both.
 
-*Advisory (opt-in `--report <name>`):* `orphans`, `symmetry`, `cross-links` (`WIKI008`), `tags`, `glossary-coverage`, `schema`, `duplicates`.
+*Advisory (opt-in `--report <name>`):* `orphans`, `symmetry`, `cross-links` (`WIKI008`), `tags`, `glossary-coverage`, `schema`, `duplicates`, `stale`. **`stale` is the pruning surface** — pages whose own frontmatter contradicts them, and self-set "re-check <month>" alarms now due. Advisory by design: the other gates are content-keyed so a clean tree stays clean, and a time-keyed hard gate would redden CI on an untouched repo.
 
 ```
 python3 .claude/scripts/wiki-lint.py wiki/
