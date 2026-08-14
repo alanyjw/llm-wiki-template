@@ -74,6 +74,7 @@ WATCH = [
     ".claude/scripts/test_wiki_lint.py",
     ".claude/scripts/regenerate-index.py",
     ".claude/scripts/check-date-updated.py",
+    ".claude/scripts/test_check_date_updated.py",
     ".claude/scripts/qmd-refresh-hook.sh",
     ".claude/scripts/bump-markdownlint-obsidian.sh",
     ".github/workflows/wiki-lint.yml",

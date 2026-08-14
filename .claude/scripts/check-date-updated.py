@@ -2,7 +2,10 @@
 """FM007 — date_updated freshness gate (CI-only, git-aware).
 
 Fails if a synthesis page's non-frontmatter body changed in this commit/PR
-but its `date_updated` frontmatter field was not bumped.
+but its `date_updated` frontmatter field is both unchanged AND stale. An
+unchanged date that is already today's is fine — a page edited twice in one
+day has nothing left to bump to, and the value still tells the truth. See
+is_current() for the reasoning and the timezone allowance.
 
 Synthesis pages in scope: wiki/insights/, wiki/topics/, wiki/plans/,
 wiki/projects/. Only files with `date_updated` present in both the old and
@@ -18,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import re
 import subprocess
 import sys
@@ -29,6 +33,44 @@ SYNTHESIS_PREFIXES = (
     "wiki/plans/",
     "wiki/projects/",
 )
+
+# How far `date_updated` may sit from the runner's own date and still count as
+# current. This is a TIMEZONE allowance, not slack: CI runs in UTC and authors
+# do not, so a vault edited in UTC+8 late in the evening carries tomorrow's date
+# from the runner's point of view, and one edited in UTC-8 early carries
+# yesterday's. One day covers every real offset in both directions.
+CURRENT_TOLERANCE_DAYS = 1
+
+ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+def is_current(date_str: str, today: datetime.date | None = None) -> bool:
+    """True if `date_str` is close enough to today to count as already updated.
+
+    Why this exists. The gate fires when the body changed and `date_updated`
+    did not move. That is the right rule for a page whose date says June — but
+    it also fired on the honest case of editing the SAME page TWICE IN ONE DAY:
+    the first commit set the date to today, the second changed the body again,
+    and there is no later value to bump to. Short of writing a false future
+    date, the author cannot satisfy the gate.
+
+    So the check is not "did the value change" but "does the value still tell
+    the truth". If `date_updated` is today, the invariant this gate protects
+    already holds, and passing is correct rather than lenient — a genuinely
+    stale page can never carry today's date.
+
+    An unparseable date returns False on purpose: no exemption is granted to a
+    value the gate cannot read, so a malformed date still fails loudly.
+    """
+    m = ISO_DATE_RE.match(date_str.strip())
+    if not m:
+        return False
+    try:
+        d = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return False
+    today = today or datetime.date.today()
+    return abs((d - today).days) <= CURRENT_TOLERANCE_DAYS
 
 
 def get_changed_files(base: str) -> list[str]:
@@ -152,6 +194,11 @@ def main() -> int:
 
         # Only fire when date_updated is present in both versions but unchanged.
         if current_date and old_date and current_date == old_date:
+            # ...and only when the unchanged value is also STALE. A second edit
+            # to the same page on the same day leaves the date already correct
+            # with nothing to bump it to — see is_current().
+            if is_current(current_date):
+                continue
             errors.append(
                 (
                     filepath,
