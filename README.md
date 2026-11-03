@@ -82,6 +82,8 @@ Every script in `.claude/scripts/` is Python 3 or POSIX `sh`, stdlib only:
   `--check` is a CI gate for index drift.
 - **`check-date-updated.py`** — CI-only `FM007` gate: a synthesis page whose body
   changed must bump `date_updated`. Needs git history, so it runs only in CI.
+- **`check-novelty-claims.py`** — CI-only `NOV002` gate: a "first vault mention"
+  claim in `wiki/log.md` must have been true at the commit that made it.
 - **`ingest-coverage.py`** — reports which notes in `raw/` no `wiki/sources/` page
   claims via `raw_sources:`. A work queue, not a gate (`--fail-on-unmapped` opts in).
 - **`leak-scan.py`** — release-time privacy gate for **identity and PII**: names,

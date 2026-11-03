@@ -213,10 +213,11 @@ Every file under `wiki/` is linted — there are no per-file carve-outs; `.obsid
 - `FM005` `raw_sources` paths must resolve on disk (catches typos and post-rename drift — silent provenance breaks, not cosmetics)
 - `RU001` Recent-updates callout missing on an `insight`/`topic`/`plan`/`project` page
 - `IO001` a file under `wiki/` could not be read or decoded (the file itself is broken, not its content)
+- `NOV001` a novelty claim (*"first vault mention"*, *"no prior reference"*, …) on a synthesis page whose subject already appears elsewhere in `wiki/`. Subjects come from the claim's own clause; `wiki/log.md` + `wiki/log/` are skipped (a dated record stays true to its day — that is `NOV002`'s job). Exists because an empty search result was once read as "absent" when the search itself had died
 
 *Soft gates (warning — reported, but the script still exits 0):* `FM002` missing `type:`; `FM003` unknown `type:` (no schema registered); `FM006` recommended keys; `RU002` callout has no dated entry; `RU003` newest callout entry is older than `date_updated`; `RU004` callout holds more than 3 entries (older roll off — callout-only trims don't need a `date_updated` bump); `PROV001` synthesis should cite `[[wiki/sources/...]]`, not `[[raw/...]]` (`projects/` exempt in its Related sources section); `WIKI007` anchor-prose source-count mismatch on topic pages. Warnings still deserve clearing — they're the ones that quietly rot retrieval — so treat a clean run as zero of both.
 
-*Advisory (opt-in `--report <name>`):* `orphans`, `symmetry`, `cross-links` (`WIKI008`), `tags`, `glossary-coverage`, `schema`, `duplicates`, `stale`. **`stale` is the pruning surface** — pages whose own frontmatter contradicts them, and self-set "re-check <month>" alarms now due. Advisory by design: the other gates are content-keyed so a clean tree stays clean, and a time-keyed hard gate would redden CI on an untouched repo.
+*Advisory (opt-in `--report <name>`):* `orphans`, `symmetry`, `cross-links` (`WIKI008`), `tags`, `glossary-coverage`, `schema`, `duplicates`, `stale`, `first-seen`. **`first-seen`** lists entity pages whose `first_seen` post-dates a page already mentioning them — noisy vault-wide on back-filled entities, but worth running on a newly minted one. **`stale` is the pruning surface** — pages whose own frontmatter contradicts them, and self-set "re-check <month>" alarms now due. Advisory by design: the other gates are content-keyed so a clean tree stays clean, and a time-keyed hard gate would redden CI on an untouched repo.
 
 ```
 python3 .claude/scripts/wiki-lint.py wiki/
@@ -225,6 +226,8 @@ python3 .claude/scripts/wiki-lint.py --report orphans         # advisory
 ```
 
 **Gate 2b — `FM007` (`check-date-updated.py`, CI-only, git-aware).** Fails if a synthesis page's *body* changed but `date_updated` wasn't bumped (scope: insights/topics/plans/projects). Needs git history, so it runs only in CI. The Recent-updates callout is stripped before comparison.
+
+**Gate 2c — `NOV002` (`check-novelty-claims.py`, CI-only, git-aware).** The `NOV001` claim class on `wiki/log.md`, diff-scoped: asks whether each *added* claim was true at the base commit, so a log line stays passing forever after while a false one fails immediately.
 
 **Gate 3 — index drift:**
 

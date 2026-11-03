@@ -10,6 +10,7 @@ on:
       - '.claude/scripts/test_wiki_lint.py'
       - '.claude/scripts/wiki-lint.config.json'
       - '.claude/scripts/check-date-updated.py'
+      - '.claude/scripts/check-novelty-claims.py'
       - '.claude/scripts/test_check_date_updated.py'
       - '.claude/scripts/regenerate-index.py'
       - '.github/workflows/wiki-lint.yml'
@@ -21,6 +22,7 @@ on:
       - '.claude/scripts/test_wiki_lint.py'
       - '.claude/scripts/wiki-lint.config.json'
       - '.claude/scripts/check-date-updated.py'
+      - '.claude/scripts/check-novelty-claims.py'
       - '.claude/scripts/test_check_date_updated.py'
       - '.claude/scripts/regenerate-index.py'
       - '.github/workflows/wiki-lint.yml'
@@ -159,6 +161,9 @@ jobs:
       #                    runs in CI. Its behaviour is invisible where the page
       #                    was written, which is how it came to red-line the
       #                    honest case of editing one page twice in a day.
+      #   check-novelty-claims — NOV002 likewise. It asks whether a novelty
+      #                    claim was true AT THE BASE COMMIT, which cannot be
+      #                    evaluated from a working tree at all.
       #
       # `unittest` exits 0 on "Ran 0 tests", so the count is asserted too: a
       # suite that collected nothing would otherwise pass while checking nothing.
@@ -166,7 +171,7 @@ jobs:
         run: |
           set -o pipefail
           TOTAL=0
-          for suite in test_wiki_lint test_check_date_updated; do
+          for suite in test_wiki_lint test_wiki_lint_novelty test_check_date_updated test_check_novelty_claims; do
             echo "--- $suite ---"
             python3 ".claude/scripts/$suite.py" -v 2>&1 | tee "/tmp/$suite.log"
             COUNT=$(grep -oE '^Ran [0-9]+ test' "/tmp/$suite.log" | grep -oE '[0-9]+' | tail -1 || true)
@@ -176,7 +181,7 @@ jobs:
             fi
             TOTAL=$((TOTAL + COUNT))
           done
-          echo "::notice title=toolchain self-tests::$TOTAL tests passed across 2 suites."
+          echo "::notice title=toolchain self-tests::$TOTAL tests passed across 4 suites."
 
       - name: Layer 2 — wiki-lint.py (gates the build)
         id: layer2
@@ -213,6 +218,36 @@ jobs:
               ;;
           esac
           python3 .claude/scripts/check-date-updated.py --base "$BASE" --gh-annotations
+
+      # NOV002 — novelty claims verified against the vault as it stood at base
+      # (CI-only, git-aware). NOV001 in wiki-lint.py covers synthesis pages
+      # content-keyed; this covers wiki/log.md, where a claim is a DATED record
+      # and can only be judged against the tree it was written against.
+      # Same base-SHA resolution and same skip conditions as FM007 above.
+      - name: Layer 2c — novelty claims (NOV002, CI-only)
+        id: novelty_check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          case "$EVENT_NAME" in
+            pull_request)
+              BASE="$PR_BASE_SHA"
+              ;;
+            push)
+              BASE="$PUSH_BEFORE_SHA"
+              if [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+                echo "Initial push — no prior commit to compare; skipping NOV002."
+                exit 0
+              fi
+              ;;
+            *)
+              echo "Event '$EVENT_NAME' has no base SHA — skipping NOV002."
+              exit 0
+              ;;
+          esac
+          python3 .claude/scripts/check-novelty-claims.py --base "$BASE" --gh-annotations
 
       # Index drift check — fails if wiki/index.md is out of sync with the
       # filesystem (missing pages, stale per-section counts, orphan entries).
