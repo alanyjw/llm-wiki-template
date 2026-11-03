@@ -75,6 +75,12 @@ WATCH = [
     ".claude/scripts/regenerate-index.py",
     ".claude/scripts/check-date-updated.py",
     ".claude/scripts/test_check_date_updated.py",
+    # The novelty gate. NOV001 lives in wiki-lint.py; NOV002 is its CI-only,
+    # git-aware half for wiki/log.md. Same reason as the suites above: the
+    # workflow runs all four suites, so an instance missing one fails CI.
+    ".claude/scripts/check-novelty-claims.py",
+    ".claude/scripts/test_check_novelty_claims.py",
+    ".claude/scripts/test_wiki_lint_novelty.py",
     ".claude/scripts/qmd-refresh-hook.sh",
     ".claude/scripts/bump-markdownlint-obsidian.sh",
     ".github/workflows/wiki-lint.yml",

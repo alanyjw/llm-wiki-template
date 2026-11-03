@@ -77,6 +77,7 @@ fix this table if the two ever disagree.
 | `.claude/scripts/wiki-lint.config.json` | **you** | Never reported as `DIFFERS`. Checked for presence only — your carve-outs are yours. |
 | `.claude/scripts/regenerate-index.py` | upstream | Take upstream, then run it once — `--check` is a separate CI gate. |
 | `.claude/scripts/check-date-updated.py` | upstream | Take upstream. |
+| `.claude/scripts/check-novelty-claims.py` | upstream | Take upstream, with its two test suites — `wiki-lint.yml` runs all four, so taking the workflow without them fails CI. |
 | `.claude/scripts/qmd-refresh-hook.sh` | upstream | Take upstream. |
 | `.claude/scripts/bump-markdownlint-obsidian.sh` | upstream | Take upstream — this is how a linter version bump reaches you. |
 | `.github/workflows/wiki-lint.yml` | upstream | Take upstream. One known exception: the `npx` note in section 5. |

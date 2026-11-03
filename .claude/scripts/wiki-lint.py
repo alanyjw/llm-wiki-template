@@ -172,6 +172,7 @@ CHECK_RAW_SOURCES = "raw-sources-paths"
 CHECK_RECENT_UPDATES = "recent-updates"
 CHECK_PROVENANCE = "provenance"
 CHECK_ANCHOR_PROSE = "anchor-prose-count"
+CHECK_NOVELTY = "novelty-claims"
 # WIKI008 / cross-link-completeness lives behind `--report cross-links` only —
 # it surfaces a mix of real drift and convention-OK asymmetries and would be
 # too noisy as a default gate. See module docstring §9.
@@ -183,7 +184,51 @@ ALL_CHECKS = [
     CHECK_RECENT_UPDATES,
     CHECK_PROVENANCE,
     CHECK_ANCHOR_PROSE,
+    CHECK_NOVELTY,
 ]
+
+# FM008 is NOT in the gate set. Run against the source vault it fired on about
+# half of all entity pages, because that vault's `first_seen` records when the entity
+# PAGE was created, not the earliest page mentioning the person. That is a
+# legitimate convention, so a hard gate on it would redden CI on an untouched
+# tree — the same reason `--report stale` is advisory. It lives behind
+# `--report first-seen` instead, where an ingest can consult it per page.
+
+
+# NOV001 / FM008 — the novelty gate. Both rules are vault-wide rather than
+# per-file: they answer "does this subject appear ANYWHERE else", which no
+# single page can settle. See check_novelty_claims() for why they exist.
+# NOV001 is scoped to SYNTHESIS pages and deliberately skips wiki/log.md and
+# wiki/log/*. A log entry is a dated historical record: "no prior reference to
+# X" was true the day it was written, and stays in the file after that same
+# ingest creates X. Content-keyed checking of a historical claim is a
+# contradiction — the log is covered by `--novelty-base`, which checks a claim
+# against the vault as it stood when the claim was committed.
+NOVELTY_SKIP_SUFFIXES = ("/wiki/log.md",)
+NOVELTY_SKIP_DIRS = ("/wiki/log/",)
+
+NOVELTY_PHRASES = (
+    "first vault mention",
+    "first mention in the vault",
+    "first time in the vault",
+    "no prior reference",
+    "no prior mention",
+    "not previously in the vault",
+    "new to the vault",
+    "first appearance in the vault",
+)
+# A page may legitimately DESCRIBE a novelty claim that turned out false —
+# wiki/log.md does exactly that for the 2026-08-27 Zembla miss. Look back this
+# far for a negation before treating a phrase hit as an assertion.
+NOVELTY_NEGATION_WINDOW = 80
+NOVELTY_NEGATIONS = (
+    "not", "n't", "never", "no longer", "wrongly", "falsely",
+    "incorrectly", "mistakenly", "erroneously", "wasn", "isn",
+)
+# Frontmatter keys that record when a page ENTERED the vault, in priority
+# order. `date_updated` is mutation not entry; `date_original` is the
+# artifact's own date and can predate the vault by decades.
+VAULT_ENTRY_DATE_KEYS = ("date_ingested", "date_created", "date_started")
 
 # WIKI007 — anchor-prose source-count parsing.
 # Spelled-out cardinal numbers (English) up to 30 + digit form.
@@ -213,6 +258,7 @@ REPORT_GLOSSARY = "glossary-coverage"  # Q2
 REPORT_SCHEMA = "schema"               # Q4
 REPORT_DUPLICATES = "duplicates"       # Q5
 REPORT_STALE = "stale"                 # pruning-visibility report
+REPORT_FIRST_SEEN = "first-seen"       # entity first_seen vs earliest mention
 
 # Thresholds for `--report stale`, in days. Deliberately generous: this report
 # exists to make pruning VISIBLE, not to nag. A page tripping STALE-A is making
@@ -283,6 +329,7 @@ STALE_DATE_KEYS_BY_TYPE = {
 ALL_REPORTS = [
     REPORT_SYMMETRY, REPORT_ORPHANS, REPORT_CROSS_LINKS, REPORT_TAGS,
     REPORT_GLOSSARY, REPORT_SCHEMA, REPORT_DUPLICATES, REPORT_STALE,
+    REPORT_FIRST_SEEN,
 ]
 
 # Synthesis folders for the advisory body/coverage/dupe reports.
@@ -984,6 +1031,199 @@ def check_raw_sources_paths(
             )
 
 
+def _vault_entry_date(fm: dict[str, str]) -> str | None:
+    """When did this page enter the vault? None if it carries no usable date."""
+    for key in VAULT_ENTRY_DATE_KEYS:
+        val = (fm.get(key) or "").strip().strip('"\'')
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", val):
+            return val
+    return None
+
+
+def build_mention_corpus(vault_root: Path) -> list[tuple[Path, str, str, str | None]]:
+    """Every wiki page as (path, text, lowered text, vault-entry date).
+
+    Scoped to `wiki/` deliberately. `raw/` is immutable source: an author's
+    name appearing in a book transcript is not a prior *wiki* mention, and
+    counting it would make almost every novelty claim unprovable.
+    """
+    corpus: list[tuple[Path, str, str, str | None]] = []
+    wiki_dir = vault_root / "wiki"
+    if not wiki_dir.is_dir():
+        return corpus
+    for f in sorted(wiki_dir.rglob("*.md")):
+        try:
+            text = f.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        fm = _extract_frontmatter(text)
+        date = _vault_entry_date(fm[0]) if fm else None
+        corpus.append((f, text, text.lower(), date))
+    return corpus
+
+
+def _mentions(name: str, text_lower: str, text: str) -> bool:
+    """Whole-word, case-insensitive containment.
+
+    Two-stage on purpose: the substring prefilter is C-speed and rules out
+    the overwhelming majority, so the regex only runs on real candidates.
+    Word boundaries are what stop a two-letter title like "Al" matching
+    inside "album" / "always" — without them the rule is unusable.
+    """
+    if name.lower() not in text_lower:
+        return False
+    return re.search(rf"\b{re.escape(name)}\b", text, re.IGNORECASE) is not None
+
+
+def _novelty_subjects(
+    line: str,
+    phrase_start: int,
+    phrase_len: int,
+    fallback_title: str | None,
+    titles_by_leaf: dict[str, str],
+) -> tuple[list[str], set[str]]:
+    """(subjects, announced-page stems) for a novelty claim, clause-confined.
+
+    Clause-scoping is the whole point. A real vault line reads:
+
+        checked existing wiki coverage via filename grep (no prior references
+        to *Slow Decline* / *Daily Ask*); read [[topics/steady-finish]]
+
+    Taking "the nearest wikilink on the line" pulls `steady-finish` out of
+    a *different clause* and reports it as the unfounded claim — which is
+    exactly what the first version of this rule did.
+
+    Within the clause we take, in order: wikilink display texts, *italicised*
+    spans, and "quoted" spans. Falls back to the page's own title only when
+    the clause offers nothing.
+    """
+    # Clause boundaries: semicolons and middots separate independent claims.
+    starts = [0] + [m.end() for m in re.finditer(r"[;·]", line)]
+    ends = [m.start() for m in re.finditer(r"[;·]", line)] + [len(line)]
+    clause = line
+    for s, e in zip(starts, ends):
+        if s <= phrase_start < e:
+            clause = line[s:e]
+            phrase_start -= s
+            break
+
+    subjects: list[str] = []
+    announced: set[str] = set()
+    for raw in re.findall(r"\[\[([^\]]+)\]\]", clause):
+        target, _, display = raw.partition("|")
+        leaf = target.strip().rstrip("/").split("/")[-1].split("#")[0]
+        # The page being ANNOUNCED mentions its own subject by construction.
+        # Track it by stem: the display name need not slugify to the filename
+        # ("Booky Author" lives at booky.md), so slug-matching alone misses it.
+        announced.add(leaf)
+        if display.strip():
+            subjects.append(display.strip())
+        else:
+            subjects.append(titles_by_leaf.get(leaf) or leaf.replace("-", " ").replace("_", " "))
+    subjects += [m.strip() for m in re.findall(r"\*([^*\n]{2,60})\*", clause)]
+    subjects += [m.strip() for m in re.findall(r"[\u201c\"]([^\u201d\"\n]{2,60})[\u201d\"]", clause)]
+    subjects = [s for s in dict.fromkeys(subjects) if s and len(s) >= 2]
+    if subjects:
+        return subjects, announced
+    return ([fallback_title] if fallback_title else []), announced
+
+
+def _is_negated(line_lower: str, phrase_start: int) -> bool:
+    window = line_lower[max(0, phrase_start - NOVELTY_NEGATION_WINDOW):phrase_start]
+    return any(neg in window for neg in NOVELTY_NEGATIONS)
+
+
+def _slugify(name: str) -> str:
+    """Page-stem form of a title: 'Ivo Zembla' -> 'ivo-zembla'."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+def check_novelty_claims(
+    path: Path,
+    text: str,
+    corpus: list[tuple[Path, str, str, str | None]],
+    findings: list[Finding],
+) -> None:
+    """NOV001 + FM008 — verify assertions that something is NEW to the vault.
+
+    Both rules exist because of one incident. On 2026-08-27 an ingest wrote
+    `entities/ivo-zembla.md` as a first-ever mention with a matching
+    `first_seen`, and put "first vault mention — no prior reference to Zembla
+    or Tarrow anywhere in `wiki/`" into the log. Zembla had been in the vault
+    since 2026-04-28, live in seven pages, as co-author of *The Core
+    Competence of the Corporation*.
+
+    The cause was not judgement. `grep -rn "Zembla" wiki/ --include=*.md`
+    **dies** in zsh — the unquoted `*.md` is glob-expanded before grep runs —
+    so it printed nothing, and the empty output was read as "term absent".
+
+    The lesson generalises past that one command: a search that returns
+    nothing is only a finding if the search actually ran. These rules check
+    the *claim* rather than the tool, so they fire however the wrong answer
+    was reached — a mistyped grep, a misread qmd result, or plain memory.
+    """
+    fm = _extract_frontmatter(text)
+    fm_dict, _ = fm if fm else ({}, 0)
+    page_title = (fm_dict.get("title") or "").strip().strip('"\'')
+
+    # build_mention_corpus() walks a RESOLVED vault_root while target files come
+    # from argv unresolved. On macOS that is /private/var vs /var — compare
+    # unresolved and a page counts as a prior mention of its own claim.
+    here = path.resolve()
+    titles_by_leaf: dict[str, str] = {}
+    for other, other_text, _, _ in corpus:
+        other_fm = _extract_frontmatter(other_text)
+        if other_fm and other_fm[0].get("title"):
+            titles_by_leaf[other.stem] = other_fm[0]["title"].strip().strip('"\'')
+
+    # ---- NOV001: prose asserting novelty about an already-present subject
+    posix = path.as_posix()
+    skip_novelty = posix.endswith(NOVELTY_SKIP_SUFFIXES) or any(
+        d in posix for d in NOVELTY_SKIP_DIRS
+    )
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if skip_novelty:
+            break
+        line_lower = line.lower()
+        for phrase in NOVELTY_PHRASES:
+            pos = line_lower.find(phrase)
+            if pos < 0 or _is_negated(line_lower, pos):
+                continue
+            subjects, announced = _novelty_subjects(
+                line, pos, len(phrase), page_title, titles_by_leaf
+            )
+            for subject in subjects:
+                priors = [
+                    other
+                    for other, other_text, other_lower, _ in corpus
+                    # The claiming page mentions its own subject by definition,
+                    # and so does the page being announced — neither is prior.
+                    if other.resolve() != here
+                    and other.stem not in announced
+                    and other.stem != _slugify(subject)
+                    and _mentions(subject, other_lower, other_text)
+                ]
+                if not priors:
+                    continue
+                shown = ", ".join(f"`{p.name}`" for p in priors[:3])
+                more = f" (+{len(priors) - 3} more)" if len(priors) > 3 else ""
+                findings.append(
+                    Finding(
+                        file=str(path),
+                        line=lineno,
+                        col=pos + 1,
+                        code="NOV001",
+                        severity=SEVERITY_ERROR,
+                        message=(
+                            f'Novelty claim "{phrase}" about `{subject}`, but '
+                            f"{len(priors)} other wiki page(s) already mention it: "
+                            f"{shown}{more}"
+                        ),
+                    )
+                )
+            break  # one phrase per line is enough to send you looking
+
+
 def check_recent_updates_callout(path: Path, text: str, findings: list[Finding]) -> None:
     """Verify in-scope synthesis pages have a Recent updates callout."""
     fm = _extract_frontmatter(text)
@@ -1584,6 +1824,72 @@ def _stale_today() -> date:
     return date.today()
 
 
+def _entity_names(fm_dict: dict[str, str], text: str) -> list[str]:
+    """An entity's title plus its aliases, in both YAML list and inline forms.
+
+    Aliases matter: the vault filed Zembla's 1990 work as "Ostrander & Zembla",
+    so a title-only match would have missed the very case this exists for.
+    """
+    names = [(fm_dict.get("title") or "").strip().strip('"\'')]
+    names += [a for a, _ in _extract_list_field(text, "aliases")]
+    names += [
+        part.strip().strip('"\'')
+        for inline in re.findall(r"^aliases:\s*\[(.*)\]", text, re.MULTILINE)
+        for part in inline.split(",")
+    ]
+    return [n for n in dict.fromkeys(n.strip() for n in names if n and n.strip()) if len(n) >= 2]
+
+
+def report_first_seen(vault_root: Path) -> int:
+    """Advisory — entity `first_seen` values that post-date an existing mention.
+
+    Was drafted as a hard gate (FM008) and demoted after running it: it fires
+    on about half of a real vault's entity pages, because its `first_seen` records when
+    the entity PAGE was created, not the earliest page that mentions the
+    person. That is a legitimate convention and a gate on it would redden CI
+    on an untouched tree — the same reasoning that keeps `--report stale`
+    advisory.
+
+    Kept because the signal is still worth having on a NEW entity page: it is
+    the check that would have caught `entities/ivo-zembla.md` shipping with
+    `first_seen: 2026-08-27` when the vault had held him since 2026-04-28.
+    Run it after minting an entity, not over the whole vault.
+    """
+    corpus = build_mention_corpus(vault_root)
+    rows: list[tuple[str, str, str, str]] = []
+    for path, text, _, _ in corpus:
+        fm = _extract_frontmatter(text)
+        if not fm or fm[0].get("type", "").strip() != "entity":
+            continue
+        fm_dict = fm[0]
+        first_seen = (fm_dict.get("first_seen") or "").strip().strip('"\'')
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", first_seen):
+            continue
+        names = _entity_names(fm_dict, text)
+        if not names:
+            continue
+        earliest: tuple[str, Path] | None = None
+        for other, other_text, other_lower, other_date in corpus:
+            if other == path or not other_date or other_date >= first_seen:
+                continue
+            if any(_mentions(n, other_lower, other_text) for n in names):
+                if earliest is None or other_date < earliest[0]:
+                    earliest = (other_date, other)
+        if earliest:
+            rows.append((path.name, first_seen, earliest[0], earliest[1].name))
+
+    print("=== first_seen vs earliest mention (advisory) ===\n")
+    if not rows:
+        print("No entity page has a first_seen later than an existing mention.")
+        return 0
+    rows.sort(key=lambda r: r[2])
+    print(f"{len(rows)} entity page(s) where an earlier page already mentions the entity.")
+    print("Expected for back-filled entities; actionable on a NEWLY minted one.\n")
+    for name, fs, earliest_date, earliest_file in rows:
+        print(f"  {name:<44} first_seen {fs}  <-  {earliest_date}  {earliest_file}")
+    return 0
+
+
 def report_stale(vault_root: Path) -> int:
     """Surface pages the vault's own data says have gone stale (advisory).
 
@@ -2165,6 +2471,8 @@ def main() -> int:
             report_duplicates(vault_root)
         elif args.report == REPORT_STALE:
             report_stale(vault_root)
+        elif args.report == REPORT_FIRST_SEEN:
+            report_first_seen(vault_root)
         return 0  # advisory — always exit 0
 
     enabled_checks = set(args.check or ALL_CHECKS)
@@ -2173,6 +2481,11 @@ def main() -> int:
     index: dict[str, list[Path]] = {}
     if CHECK_BROKEN_WIKILINK in enabled_checks:
         index = build_vault_index(vault_root)
+
+    # NOV001/FM008 need the whole corpus, not one page — built once.
+    mention_corpus: list[tuple[Path, str, str, str | None]] = []
+    if CHECK_NOVELTY in enabled_checks:
+        mention_corpus = build_mention_corpus(vault_root)
 
     target_files: list[Path] = []
     for raw_path in args.paths:
@@ -2215,6 +2528,8 @@ def main() -> int:
             check_inline_provenance(path, text, findings)
         if CHECK_ANCHOR_PROSE in enabled_checks:
             check_anchor_prose_count(path, text, findings)
+        if CHECK_NOVELTY in enabled_checks:
+            check_novelty_claims(path, text, mention_corpus, findings)
 
     # WIKI008 / cross-link-completeness is NOT a default check — run on demand
     # via `--report cross-links` (see report_cross_links).
